@@ -19,12 +19,14 @@ python3 server.py          # http://localhost:8000
 - 审计事件回放：   http://localhost:8000/replay
 - 事故分析报告：   http://localhost:8000/report
 - 外发凭证柜：     http://localhost:8000/voucher
+- 雷暴撤离调度端： http://localhost:8000/storm
+- 雷暴撤离移动端： http://localhost:8000/storm-mobile
 - 接口文档（Swagger）：http://localhost:8000/docs
 
 ## 测试
 
 ```bash
-python3 -m pytest test_system.py test_offline_packages.py test_shift.py test_replay.py test_vouchers.py test_tools.py test_metro.py -q     # 144 个端到端用例
+python3 -m pytest test_system.py test_offline_packages.py test_shift.py test_replay.py test_vouchers.py test_tools.py test_metro.py test_storm.py -q     # 165 个端到端用例
 ```
 
 ## 现场班组工器具借还台
@@ -103,6 +105,45 @@ python3 -m pytest test_system.py test_offline_packages.py test_shift.py test_rep
 - 检定与召回页面（`/metro`）展示**证书沿革、适用范围、受影响任务、器具处置和每次裁决依据**，
   可一键操作八幕：证书换版、临近到期/电压不符拒绝、批次召回（四处置同一事务）、
   召回与许可冲突、重复召回、现场使用中冻结、复检部分恢复、重启后继续处理。
+
+## 雷暴撤离与复工闸门（storm.py）
+
+气象告警命中作业区域时，值班长发布撤离令（`POST /api/tickets/{tid}/storm/evacuation-orders`），
+系统在**同一事务内立即固定**本次撤离快照（表 `storm_*`）：人员名册（含每人独立签到口令）、
+**仍带电的风险点**（隔离前工作区带电设备；边界开关电源侧防误合反送；带电接地点）、
+**现场工器具占有情况**（在库锁定/已领用在现场/随箱持有，逐件快照）与**各安全票所处阶段**，
+票据立即冻结，撤离中任何作业（含恢复步骤）、许可与收工一律阻断（`EVACUATION_GATE_CLOSED`）。
+
+- **移动端扫码到达**（`POST /api/storm/batches/{bid}/checkins`）：成员凭**本人名册口令**
+  扫避险点码（QR-SH-A/B/C）。代签（口令不符 `PROXY_SIGN_REJECTED`）、同人同点重复扫码
+  （`DUPLICATE`，回首次结果不多写）、**已离场人员误入名册**（撤离前已登记 `LEFT`，
+  `PERSON_ALREADY_LEFT`）、**未登记人员签到**（`PERSON_NOT_IN_ROSTER`）都给出确定裁决落库；
+  同一人更换避险点时旧去向置 `SUPERSEDED`，部分唯一索引保证每人至多一条 `CURRENT` 最新去向。
+- **风险点监护**：值班长按风险点指派监护人，监护人凭本人口令确认落实（代确认 `GUARDIAN_PROXY_REJECTED`）。
+- **工器具现场去向**（`/tool-sightings`）：在库锁定件无需申报（`TOOL_NOT_ON_SITE`）；
+  同件两人各报持有→先到为准后者 `CONFLICT`；持有人改报去向旧行 `SUPERSEDED`；同去向重放 `DUPLICATE`；
+  报去向不明（LOST）不是占有主张，任何人之后报找回均可覆盖，不判冲突。
+- **复工三条件**：任何人未确认安全（`PERSON_NOT_SAFE`）、关键器具去向不明（`TOOL_LOCATION_UNKNOWN`）、
+  风险点未落实监护（`RISK_NOT_GUARDED`），现场负责人清点确认一律拒绝并列出具体未清项。
+- **双角色放行（同一撤离批次 + 同一环境版本）**：现场负责人确认人员与器具清点
+  （`/confirms/field`），调度员核验**气象解除、网络拓扑版本、隔离边界**（`/confirms/dispatch`，
+  告警未消 `WEATHER_ALERT_ACTIVE`、拓扑变化 `BOUNDARY_VERSION_CHANGED`）。环境版本由
+  （拓扑版本, 气象序号, 告警序号）三元组摘要构成；任一依据变化（新告警/气象解除/拓扑变更）
+  旧确认置 `SUPERSEDED` 保留可查、不删除，须按新版本重新确认；两确认环境不一致闸门不开。
+  双确认同环境齐全 → 批次 `WAITING_RESUME` 票据解冻，`/resume` 正式复工。
+- **新告警抢占**（`/api/storm/weather-alerts`）：命中区域的**待复工批次**被抢占为 `PREEMPTED`
+  （确认全失效、票据再冻结），需值班长就新告警开新一轮撤离批次；撤离中的批次保持 ACTIVE，
+  已复工/终局批次不回退。撤离与签到事实永不删除。
+- **并发与终局唯一**：撤离令、收工、票据撤销、换班、新告警在 `db.lock` 串行事务内裁决；
+  票据已撤销/关闭时撤离令拒绝（`TICKET_NOT_ACTIVE`），开放批次随收工/撤销 `TERMINATED`，
+  每角色有效确认、每人当前去向均有数据库部分唯一索引兜底，只有一个最终阶段。
+- **幂等**：撤离令/签到/监护确认/去向申报/双确认/复工/告警均支持幂等键或自然键
+  （确认键含环境摘要），相同请求重放返回最初结果，绝不多写签到、清点或放行记录。
+- **重启恢复**：全部状态事务化持久化于 SQLite，`POST /api/admin/reopen` 后名册快照、
+  避险点分布、未清人员/风险/器具、有效/失效确认与批次阶段完整还原，流程可继续。
+- 调度端 `/storm` 展示区域态势、告警、撤离批次、人员分布、未清风险与复工依据、裁决流水；
+  移动端 `/storm-mobile` 可签到、纠正去向、申报器具去向、本人监护确认并查看每条拒绝原因；
+  `POST /api/demo/storm/prepare` 一键准备「已隔离许可+工具领用+名册」的演示现场。
 
 
 

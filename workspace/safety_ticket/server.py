@@ -22,6 +22,7 @@ import domain
 import replay as replay_engine
 import tools as tools_mod
 import metro
+import storm
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
@@ -151,6 +152,61 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_metro_pass ON metro_rechecks(recall, seria
 -- 召回解除裁决：(召回,复检单) 唯一，重复解除返回首次部分恢复结果
 CREATE TABLE IF NOT EXISTS metro_releases(recall TEXT, recheck_id TEXT, result_json TEXT,
     actor TEXT, created_at REAL, PRIMARY KEY(recall, recheck_id));
+
+-- ============================================================ 雷暴撤离与复工闸门
+-- 气象告警：进入/解除都推进 storm_weather_seq；雷暴进入推进 storm_alert_seq（只增不退）
+CREATE TABLE IF NOT EXISTS storm_alerts(alert_id TEXT PRIMARY KEY, seq INTEGER, level TEXT,
+    areas_json TEXT, status TEXT, issued_by TEXT, issued_at REAL, cleared_at REAL);
+CREATE TABLE IF NOT EXISTS storm_shelters(code TEXT PRIMARY KEY, name TEXT,
+    qr_token TEXT UNIQUE, capacity INTEGER);
+-- 人员名册维护（撤离令之前登记；撤离时整体快照固定，之后不可改写）
+CREATE TABLE IF NOT EXISTS storm_roster(ticket TEXT, person TEXT, token TEXT,
+    status TEXT, current_loc TEXT, updated_at REAL, PRIMARY KEY(ticket, person));
+-- 撤离批次：一张票可多次撤离；只有开放批次（ACTIVE/WAITING_RESUME）接受操作
+CREATE TABLE IF NOT EXISTS storm_batches(id TEXT PRIMARY KEY, ticket TEXT, seq INTEGER,
+    status TEXT, alert_id TEXT, reason TEXT,
+    env_digest TEXT, env_topology INTEGER, env_weather_seq INTEGER, env_alert_seq INTEGER,
+    leader TEXT, created_by TEXT, created_at REAL, resumed_at REAL, preempt_reason TEXT);
+-- 固定名册快照：含撤离令前已离场成员（LEFT），其签到一律拒绝；个人口令随快照固化
+CREATE TABLE IF NOT EXISTS storm_roster_snap(batch TEXT, ticket TEXT, person TEXT, token TEXT,
+    status TEXT, current_loc TEXT, PRIMARY KEY(batch, person));
+-- 避险点签到：仅 decision='CURRENT' 为最新有效去向；换点旧行置 SUPERSEDED
+CREATE TABLE IF NOT EXISTS storm_checkins(rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch TEXT, ticket TEXT, person TEXT, shelter TEXT, decision TEXT, token_ok INTEGER,
+    actor TEXT, client_id TEXT, client_seq INTEGER, checked_in_at REAL, superseded_at REAL);
+-- 同一人在同一批次至多一个最新有效去向（更换避险点只保留最新）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_storm_checkins_current
+    ON storm_checkins(batch, person) WHERE decision='CURRENT';
+-- 撤离当时仍带电的风险点：须先指派监护人（ASSIGNED），再由监护人本人确认（GUARDED）
+CREATE TABLE IF NOT EXISTS storm_risks(batch TEXT, line_no INTEGER, device TEXT, kind TEXT,
+    detail TEXT, guardian TEXT, status TEXT, PRIMARY KEY(batch, line_no));
+-- 工器具占有快照：撤离令当时逐件固定；location_known=0 表示去向待申报
+CREATE TABLE IF NOT EXISTS storm_tools(batch TEXT, line_no INTEGER, code TEXT, name TEXT,
+    batch_id_item TEXT, serial TEXT, possession TEXT, box TEXT,
+    location_known INTEGER, location_where TEXT, location_holder TEXT, updated_at REAL,
+    PRIMARY KEY(batch, line_no));
+-- 现场工器具去向申报：同件只保留最后一条 VALID；SUPERSEDED/CONFLICT/DUPLICATE 均留痕
+CREATE TABLE IF NOT EXISTS storm_tool_sightings(rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch TEXT, serial TEXT, location_where TEXT, location_holder TEXT, actor TEXT,
+    decision TEXT, created_at REAL, superseded_at REAL);
+-- 同一批次同一器具至多一条 VALID 去向（数据库层兜底，配合事务裁决）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_storm_sighting_valid
+    ON storm_tool_sightings(batch, serial) WHERE decision='VALID';
+-- 各安全票撤离当时所处阶段（阶段快照，票据同时进入冻结）
+CREATE TABLE IF NOT EXISTS storm_tickets(batch TEXT, ticket TEXT, status_at_order TEXT,
+    frozen INTEGER, frozen_at REAL, thawed_at REAL, PRIMARY KEY(batch, ticket));
+-- 双角色放行确认：两项确认须同一批次同一环境摘要；依据变化后旧行置 SUPERSEDED（不删除）
+CREATE TABLE IF NOT EXISTS storm_confirms(rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch TEXT, role TEXT, leader TEXT, env_digest TEXT, env_topology INTEGER,
+    env_weather_seq INTEGER, env_alert_seq INTEGER,
+    status TEXT, created_at REAL, superseded_at REAL);
+-- 同一批次每个角色至多一条有效放行确认（数据库层保证双角色唯一最终裁决）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_storm_confirms_valid
+    ON storm_confirms(batch, role) WHERE status='VALID';
+-- 全部关键状态与裁决理由落库（签到/监护/去向/清点/放行/抢占/终局/失效）
+CREATE TABLE IF NOT EXISTS storm_decisions(rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch TEXT, scene TEXT, reason_code TEXT, detail TEXT, actor TEXT, ref TEXT,
+    accepted INTEGER, created_at REAL);
 """
 
 ACTIVE_STATUS = ('ISOLATING', 'PERMITTED', 'RESTORING')   # 参与边界校验/冻结的状态
@@ -198,6 +254,9 @@ class DB:
         with self.lock:
             self.conn.executescript(SCHEMA)
             self.conn.execute("INSERT OR IGNORE INTO meta(k,v) VALUES('topo_version','1')")
+            self.conn.execute("INSERT OR IGNORE INTO meta(k,v) VALUES('storm_weather_seq','0')")
+            self.conn.execute("INSERT OR IGNORE INTO meta(k,v) VALUES('storm_alert_seq','0')")
+            seed_shelters(self.conn)
             # 迁移：票据写权班组（任何时刻一张工作票只允许一个班组追加现场证据）
             cols = [r['name'] for r in self.conn.execute('PRAGMA table_info(tickets)')]
             if 'write_owner' not in cols:
@@ -327,6 +386,21 @@ def seed_tools(db):
     db.x('INSERT INTO tools(code,serial,batch_id,state,wear,seal_ok) VALUES(?,?,?,?,?,1)',
          ('ROD', 'ROD-B2311-05', 'B2311', 'MAINTENANCE', 'BAD'))
     db.commit()
+
+
+# ---------------------------------------------------------------- 避险点种子
+SHELTER_SEED = [
+    ('SH-A', '1号避险点（开关场东侧）', 30),
+    ('SH-B', '2号避险点（主控楼一层）', 30),
+    ('SH-C', '3号避险点（配电楼西侧）', 20),
+]
+
+
+def seed_shelters(conn):
+    """避险点与其扫码令牌（移动端扫码到达，令牌即点码）。"""
+    for code, name, cap in SHELTER_SEED:
+        conn.execute('INSERT OR IGNORE INTO storm_shelters(code,name,qr_token,capacity) '
+                     'VALUES(?,?,?,?)', (code, name, 'QR-' + code, cap))
 
 
 # ---------------------------------------------------------------- 通用助手
@@ -466,6 +540,13 @@ def report_core(db, tid, step_id, actor, scanned, source='ONLINE'):
         raise RuleError(409, 'TICKET_INACTIVE', f"许可单已失效：票据状态 {t['status']}，旧证据按影响范围拒收")
     if t['frozen'] and step['phase'] != 'REST':
         raise RuleError(423, 'TICKET_FROZEN', f"票据已冻结（{t['freeze_reason']}），禁止新增操作")
+    # 雷暴撤离闸门：撤离中任何新增作业（含恢复步骤）一律阻断
+    eb = db.one("SELECT id,status FROM storm_batches WHERE ticket=? AND status IN (?,?) "
+                "ORDER BY created_at DESC", (tid, storm.EV_ACTIVE, storm.EV_WAITING_RESUME))
+    if eb:
+        raise RuleError(423, 'EVACUATION_GATE_CLOSED',
+                        f"雷暴撤离批次 {eb['id']}（{eb['status']}）闸门未开启："
+                        "人员未确认安全/风险点未监护/器具未清点或双确认未完成前，禁止任何作业")
     if step['status'] != 'PENDING':
         if step['status'] == 'REPORTED':
             raise RuleError(409, 'STEP_ALREADY_REPORTED',
@@ -502,6 +583,12 @@ def verify_core(db, tid, step_id, actor, source='ONLINE'):
         raise RuleError(409, 'TICKET_INACTIVE', f"许可单已失效：票据状态 {t['status']}，旧证据按影响范围拒收")
     if t['frozen'] and step['phase'] != 'REST':
         raise RuleError(423, 'TICKET_FROZEN', f"票据已冻结（{t['freeze_reason']}），禁止新增操作")
+    # 雷暴撤离闸门：撤离中任何复核（含恢复步骤）一律阻断
+    eb = db.one("SELECT id,status FROM storm_batches WHERE ticket=? AND status IN (?,?) "
+                "ORDER BY created_at DESC", (tid, storm.EV_ACTIVE, storm.EV_WAITING_RESUME))
+    if eb:
+        raise RuleError(423, 'EVACUATION_GATE_CLOSED',
+                        f"雷暴撤离批次 {eb['id']}（{eb['status']}）闸门未开启，禁止任何复核")
     if step['status'] != 'REPORTED':
         if step['status'] == 'VERIFIED':
             raise RuleError(409, 'STEP_ALREADY_VERIFIED',
@@ -538,6 +625,8 @@ def verify_core(db, tid, step_id, actor, source='ONLINE'):
             ev(db, tid, actor, 'TICKET_CLOSED', note='恢复送电完成，控制权全部释放', source=source)
             # 工作票关闭：关闭尚未完成的换班
             close_handovers(db, tid, 'TICKET_CLOSED', '工作票已关闭', actor)
+            # 雷暴撤离批次随票据收工终局（无需复工）
+            storm.terminate_batch(db, tid, 'TICKET_CLOSED', '作业收工关闭', actor)
     return {'ok': True, 'step': step_id, 'status': 'VERIFIED'}
 
 
@@ -1726,6 +1815,10 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
                 raise HTTPException(409, f'状态 {t["status"]} 不能许可开工')
             if t['frozen']:
                 raise HTTPException(423, f"票据已冻结：{t['freeze_reason']}")
+            eb = db.one("SELECT id FROM storm_batches WHERE ticket=? AND status IN (?,?)",
+                        (tid, storm.EV_ACTIVE, storm.EV_WAITING_RESUME))
+            if eb:
+                raise HTTPException(423, f'雷暴撤离批次 {eb["id"]} 未放行，禁止许可开工')
             steps = get_steps(db, tid)
             if any(s['status'] != 'VERIFIED' for s in steps if s['phase'] == 'ISO'):
                 raise HTTPException(409, '隔离步骤未全部复核完成，禁止许可开工')
@@ -1747,6 +1840,12 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
                 raise HTTPException(409, f'状态 {t["status"]} 不能收工')
             if t['frozen']:
                 raise HTTPException(423, f"票据已冻结：{t['freeze_reason']}")
+            eb = db.one("SELECT id FROM storm_batches WHERE ticket=? AND status IN (?,?)",
+                        (tid, storm.EV_ACTIVE, storm.EV_WAITING_RESUME))
+            if eb:
+                # 撤离令先到：收工请求拒绝（不删除已发生撤离事实）
+                raise HTTPException(423,
+                                    f'雷暴撤离批次 {eb["id"]} 进行中：人员未安全返回前不得收工')
             iso = get_steps(db, tid)
             rest = domain.restoration_steps(iso)
             base = max(s['seq'] for s in iso)
@@ -1882,6 +1981,9 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
             ev(db, tid, req.actor, 'TICKET_WITHDRAWN', reason=req.reason,
                released_immediately=[d for d in t['boundary']['control'] if d not in retained],
                retained_physical=retained)
+            # 票据撤销：撤离批次终止（不再复工，撤离/签到事实保留）
+            storm.terminate_batch(db, tid, 'TICKET_WITHDRAWN',
+                                  req.reason or '安全票撤销', req.actor)
             db.commit()
             return {'ok': True, 'retained_physical': retained}
 
@@ -2939,6 +3041,8 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
                                      lambda p: p['snapshot'] != v and p['status'] in PKG_LIVE_STATES,
                                      f'边界版本改变（拓扑变更至 v{v}），旧授权作废', req.actor)
             revalidate_all(db, req.actor)
+            # 雷暴闸门：拓扑变更推进环境版本，开放批次旧确认失效、待复工退回撤离中
+            storm.topology_changed(db, req.actor)
             db.commit()
             return {'ok': True, 'version': v}
 
@@ -3370,6 +3474,288 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
             db.commit()
             return {'ok': True, 'note': '演示数据已复位：召回全部解除、器具回库、证书回到种子 v1'}
 
+    # ============================================================== 雷暴撤离与复工闸门
+    def storm_err(e):
+        return HTTPException(e.http_status, {'reason_code': e.reason_code, 'detail': e.detail})
+
+    class WxAlertReq(BaseModel):
+        areas: list[str]
+        level: str = 'THUNDER'
+        actor: str = '气象台'
+        alert_id: Optional[str] = None
+        idem_key: Optional[str] = None
+
+    @app.post('/api/storm/weather-alerts', status_code=201)
+    def api_storm_alert(req: WxAlertReq):
+        with db.lock:
+            try:
+                # 核心内已完成：命中裁决 → 抢占待复工批次 → 失效开放批次确认（同一事务）
+                resp = storm.weather_alert_core(db, req.areas, req.level, req.actor,
+                                                req.alert_id, req.idem_key)
+                db.commit()
+                return resp
+            except storm.RuleError as e:
+                db.rollback()
+                raise storm_err(e)
+
+    class WxClearReq(BaseModel):
+        areas: Optional[list[str]] = None
+        actor: str = '气象台'
+        idem_key: Optional[str] = None
+
+    @app.post('/api/storm/weather-clear')
+    def api_storm_clear(req: WxClearReq):
+        with db.lock:
+            try:
+                return storm.weather_clear_core(db, req.areas, req.actor, req.idem_key)
+            except storm.RuleError as e:
+                db.rollback()
+                raise storm_err(e)
+
+    @app.get('/api/storm/weather')
+    def api_storm_weather():
+        with db.lock:
+            return {'alerts': [dict(r) | {'areas': json.loads(r['areas_json'])}
+                               for r in db.q('SELECT * FROM storm_alerts ORDER BY seq DESC')],
+                    'env': {**storm.env_version(db), 'digest': storm.env_digest(storm.env_version(db))}}
+
+    @app.get('/api/storm/shelters')
+    def api_storm_shelters():
+        with db.lock:
+            return storm.list_shelters(db)
+
+    class RosterReq(BaseModel):
+        person: str
+        token: Optional[str] = None
+        actor: str = '现场负责人'
+
+    @app.post('/api/tickets/{tid}/storm/roster', status_code=201)
+    def api_roster_add(tid: str, req: RosterReq):
+        try:
+            return storm.roster_add_core(db, tid, req.person, req.token, req.actor)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    @app.post('/api/tickets/{tid}/storm/roster/{person}/left')
+    def api_roster_left(tid: str, person: str, req: ActorReq):
+        try:
+            return storm.roster_mark_left_core(db, tid, person, req.actor)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    @app.get('/api/tickets/{tid}/storm/roster')
+    def api_roster_view(tid: str):
+        get_ticket(db, tid)
+        with db.lock:
+            return [dict(r) for r in db.q(
+                'SELECT person,status,current_loc,updated_at FROM storm_roster '
+                'WHERE ticket=? ORDER BY person', (tid,))]
+
+    class EvacReq(BaseModel):
+        actor: str = '值班长'
+        reason: Optional[str] = None
+        alert_id: Optional[str] = None
+        idem_key: Optional[str] = None
+
+    @app.post('/api/tickets/{tid}/storm/evacuation-orders', status_code=201)
+    def api_evac_order(tid: str, req: EvacReq):
+        with db.lock:
+            try:
+                return storm.order_evac_core(db, tid, req.actor, req.reason,
+                                           req.idem_key, req.alert_id)
+            except storm.RuleError as e:
+                db.rollback()
+                raise storm_err(e)
+
+    @app.get('/api/storm/batches')
+    def api_storm_batches(area: Optional[str] = None):
+        with db.lock:
+            return storm.board_view(db, area)
+
+    @app.get('/api/storm/batches/{bid}')
+    def api_storm_batch(bid: str):
+        with db.lock:
+            try:
+                return storm.batch_view(db, bid)
+            except storm.RuleError as e:
+                raise storm_err(e)
+
+    class CheckinReq(BaseModel):
+        person: str
+        token: str
+        shelter: str
+        actor: Optional[str] = None
+        client_id: Optional[str] = None
+        client_seq: Optional[int] = None
+        idem_key: Optional[str] = None
+
+    @app.post('/api/storm/batches/{bid}/checkins')
+    def api_storm_checkin(bid: str, req: CheckinReq):
+        with db.lock:
+            # 代签/重复/误入名册/未登记等为确定性裁决结果（ok=false，HTTP 200），全部落库
+            resp = storm.checkin_core(db, bid, req.person, req.token, req.shelter,
+                                      req.actor, req.client_id, req.client_seq, req.idem_key)
+            db.commit()
+            return resp
+
+    class GuardAssignReq(BaseModel):
+        guardian: str
+        actor: str = '值班长'
+
+    @app.post('/api/storm/batches/{bid}/risks/{line_no}/guardian')
+    def api_guard_assign(bid: str, line_no: int, req: GuardAssignReq):
+        try:
+            return storm.assign_guard_core(db, bid, line_no, req.guardian, req.actor)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    class GuardConfirmReq(BaseModel):
+        guardian: str
+        token: str
+        actor: Optional[str] = None
+        idem_key: Optional[str] = None
+
+    @app.post('/api/storm/batches/{bid}/risks/{line_no}/confirm')
+    def api_guard_confirm(bid: str, line_no: int, req: GuardConfirmReq):
+        try:
+            return storm.confirm_guard_core(db, bid, line_no, req.guardian, req.token,
+                                           req.actor, req.idem_key)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    class SightingReq(BaseModel):
+        serial: str
+        where: str                          # SHELTER | BOX | LOST
+        holder: Optional[str] = None
+        actor: Optional[str] = None
+        idem_key: Optional[str] = None
+
+    @app.post('/api/storm/batches/{bid}/tool-sightings')
+    def api_tool_sighting(bid: str, req: SightingReq):
+        try:
+            return storm.tool_sighting_core(db, bid, req.serial, req.where, req.holder,
+                                            req.actor, req.idem_key)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    class ConfirmReq(BaseModel):
+        leader: str
+        actor: Optional[str] = None
+        idem_key: Optional[str] = None
+
+    @app.post('/api/storm/batches/{bid}/confirms/field')
+    def api_confirm_field(bid: str, req: ConfirmReq):
+        try:
+            return storm.field_confirm_core(db, bid, req.leader, req.actor, req.idem_key)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    @app.post('/api/storm/batches/{bid}/confirms/dispatch')
+    def api_confirm_dispatch(bid: str, req: ConfirmReq):
+        try:
+            return storm.dispatcher_confirm_core(db, bid, req.leader, req.actor, req.idem_key)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    class ResumeReq(BaseModel):
+        actor: str = '现场负责人'
+        idem_key: Optional[str] = None
+
+    @app.post('/api/storm/batches/{bid}/resume')
+    def api_resume(bid: str, req: ResumeReq):
+        try:
+            return storm.resume_work_core(db, bid, req.actor, req.idem_key)
+        except storm.RuleError as e:
+            raise storm_err(e)
+
+    @app.get('/api/storm/person/{bid}/{person}')
+    def api_storm_person(bid: str, person: str):
+        with db.lock:
+            try:
+                return storm.person_view(db, bid, person)
+            except storm.RuleError as e:
+                raise storm_err(e)
+
+    @app.get('/api/storm/decisions')
+    def api_storm_decisions(limit: int = 200, batch: Optional[str] = None):
+        with db.lock:
+            sql = ('SELECT rowid,batch,scene,reason_code,detail,actor,ref,accepted,created_at '
+                   'FROM storm_decisions WHERE 1=1')
+            args = []
+            if batch:
+                sql += ' AND batch=?'
+                args.append(batch)
+            sql += ' ORDER BY rowid DESC LIMIT ?'
+            args.append(limit)
+            return [dict(r) for r in db.q(sql, args)]
+
+    @app.post('/api/demo/storm/prepare', status_code=201)
+    def api_demo_storm_prepare():
+        """雷暴撤离演示准备：开一张 F2 检修票、隔离并许可到作业中，锁定+领用一套工具，
+        登记名册（含一名将演示“已离场”的成员）。返回后续演示所需 id 与口令。"""
+        with db.lock:
+            ts = time.strftime('%H%M%S')
+            title = f'雷暴演示·{ts}'
+            topo = load_topo(db)
+            b = topo.derive_boundary(['F2'])
+            tid = 'TST' + ts + uuid.uuid4().hex[:4].upper()
+            now_ms = int(time.time() * 1000)
+            db.x('INSERT INTO tickets(id,title,work_area,boundary,snapshot,status,frozen,'
+                 'freeze_reason,created_by,created_at,permit_by,permit_at,write_owner,'
+                 'plan_start_ms,plan_end_ms,voltage_kv) '
+                 'VALUES(?,?,?,?,?,?,0,NULL,?,?,NULL,NULL,?,?,?,10)',
+                 (tid, title, json.dumps(b['work_area']), json.dumps(b, ensure_ascii=False),
+                  topo.version, 'ISOLATING', '调度员A', time.time(), '甲班',
+                  now_ms, now_ms + 8 * 3600_000))
+            for i, s in enumerate(domain.isolation_steps(b), 1):
+                db.x('INSERT INTO steps(id,ticket,seq,phase,kind,device,point,sw,expected,desc) '
+                     'VALUES(?,?,?,?,?,?,?,?,?,?)',
+                     (f'{tid}:{i}', tid, i, s['phase'], s['kind'], s['device'],
+                      s['point'], s['sw'], s['expected'], s['desc']))
+            acquire_control(db, tid, b['control'])
+            ev(db, tid, '调度员A', 'TICKET_CREATED', title=title, work_area=b['work_area'])
+            # 全部隔离步骤模拟操作 + 双人复核
+            steps = get_steps(db, tid)
+            for s in steps:
+                if s['kind'] == domain.OPEN_SWITCH:
+                    db.x("UPDATE devices SET state='OPEN' WHERE id=?", (s['device'],))
+                else:
+                    db.x('INSERT OR IGNORE INTO grounds(point,sw,ticket) VALUES(?,?,?)',
+                         (s['point'], s['sw'], tid))
+                db.x("UPDATE steps SET status='REPORTED',reporter=?,reported_at=? WHERE id=?",
+                     ('张三', time.time(), s['id']))
+                db.x("UPDATE steps SET status='VERIFIED',verifier=?,verified_at=? WHERE id=?",
+                     ('李四', time.time(), s['id']))
+            db.x("UPDATE tickets SET status='PERMITTED',permit_by=?,permit_at=? WHERE id=?",
+                 ('调度员A', time.time(), tid))
+            ev(db, tid, '调度员A', 'PERMIT_GRANTED', demo=True)
+            # 工具：自动选件锁定一套，建箱并领用两件（在现场），其余在库锁定
+            try:
+                lv = tools_mod.lock_core(db, tid, None, '库管员', partial=False)
+            except tools_mod.RuleError as e:
+                db.rollback()
+                raise HTTPException(409, f'演示准备失败（工具锁定）：{e.detail}')
+            box = tools_mod.create_box_core(db, tid, box_id='BX' + tid[3:], actor='库管员')
+            issued = []
+            for line in box['lines'][:2]:
+                r = tools_mod.scan_online_core(db, tools_mod.get_secret(db), 'PDA-DEMO',
+                                              box['id'], line['serial'])
+                issued.append({'serial': line['serial'], 'ok': r.get('ok')})
+            # 名册：4 名在册（其中王五将标记离场）+ 口令一并返回
+            members = [('张三', None), ('李四', None), ('赵六', None), ('孙七', None)]
+            tokens = {}
+            for person, _ in members:
+                tok = 'PW' + uuid.uuid4().hex[:10].upper()
+                tokens[person] = tok
+                db.x('INSERT INTO storm_roster(ticket,person,token,status,current_loc,updated_at) '
+                     'VALUES(?,?,?,?,?,?)', (tid, person, tok, storm.PR_ON_DUTY,
+                                            storm.LOC_AT_RISK, time.time()))
+            db.commit()
+            return {'ticket_id': tid, 'title': title,
+                    'members': [p for p, _ in members], 'tokens': tokens,
+                    'box_id': box['id'], 'issued_serials': [x['serial'] for x in issued],
+                    'shelters': storm.list_shelters(db)}
+
     # ---- 页面
     import os
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
@@ -3405,6 +3791,14 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
     @app.get('/metro')
     def page_metro():
         return FileResponse(os.path.join(static_dir, 'metro.html'))
+
+    @app.get('/storm')
+    def page_storm():
+        return FileResponse(os.path.join(static_dir, 'storm.html'))
+
+    @app.get('/storm-mobile')
+    def page_storm_mobile():
+        return FileResponse(os.path.join(static_dir, 'storm-mobile.html'))
 
     app.state.db = db
     return app

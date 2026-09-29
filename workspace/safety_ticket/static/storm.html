@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>雷暴撤离与复工闸门 · 调度端</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; background:#0f1620; color:#dbe4ee; }
+  header { padding:10px 18px; background:#16202e; border-bottom:1px solid #263449; display:flex; gap:16px; align-items:center;}
+  header h1 { font-size:17px; margin:0; color:#ffb454; }
+  header a { color:#9fb3c8; font-size:13px; }
+  main { padding:10px; display:grid; grid-template-columns: 1fr 380px; gap:10px; }
+  .card { background:#16202e; border:1px solid #263449; border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:#ffb454; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:13px; margin:2px;}
+  button:hover { background:#388bfd; }
+  button.ghost { background:#2a3a4f; }
+  button.warn { background:#b8741a; }
+  button.danger { background:#b8323e; }
+  button.ok { background:#1a7f4b; }
+  button:disabled { background:#3a4a5f; cursor:not-allowed; }
+  input,select { background:#0b1119; color:#dbe4ee; border:1px solid #33465e; border-radius:5px; padding:4px 8px; font-size:13px; margin:2px;}
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { padding:4px 6px; border-bottom:1px solid #22303f; text-align:left; vertical-align:top;}
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11.5px; margin:1px; white-space:nowrap;}
+  .st-ACTIVE { background:#b8323e; } .st-WAITING_RESUME { background:#1a7f4b; }
+  .st-RESUMED { background:#3a4a5f; } .st-PREEMPTED { background:#7a4fb0; }
+  .st-TERMINATED { background:#44505f; }
+  .d-CURRENT { background:#1a7f4b; } .d-SUPERSEDED { background:#7a6a2a; } .d-DUPLICATE { background:#2a3a4f; }
+  .d-CONFLICT { background:#b8323e; } .d-GUARDED { background:#1a7f4b; }
+  .d-ASSIGNED { background:#8a6d1a; } .d-PENDING { background:#5a3038; }
+  .red { color:#e5534b; } .green { color:#2ea043; } .amber { color:#d4a72c; } .muted { color:#8fa3b8; }
+  #decisions { max-height:340px; overflow-y:auto; font-size:12px; }
+  #decisions .row { padding:3px 4px; border-bottom:1px solid #1c2836; }
+  #decisions .no { color:#e5534b; }
+  .kv { font-size:12px; color:#9fb3c8; }
+  .kv b { color:#dbe4ee; }
+  .shelter-chip { display:inline-block; background:#1c2c44; border-radius:6px; padding:2px 8px; margin:2px; font-size:12px;}
+  .gate li { margin:2px 0; }
+  .batch-head { cursor:pointer; }
+  details summary { cursor:pointer; color:#ffb454; font-size:13px; margin:4px 0;}
+  .env-same { color:#2ea043; } .env-diff { color:#e5534b; }
+  .mini { font-size:11.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⛈ 雷暴撤离与复工闸门 · 调度端</h1>
+  <a href="/" target="_blank">→ 调度端主页</a>
+  <a href="/storm-mobile" target="_blank">→ 移动端（现场）</a>
+  <span id="env" style="margin-left:auto;font-size:12px;color:#9fb3c8"></span>
+</header>
+<main>
+<section>
+  <div class="card">
+    <h3>气象告警与演示编排</h3>
+    <div>
+      作业区域
+      <select id="wx-area"><option>F2</option><option>F1</option><option>F3</option><option>N1</option><option>T1</option></select>
+      <button class="danger" onclick="alertIn()">发布雷暴告警</button>
+      <button class="ok" onclick="weatherClear()">气象解除</button>
+      <span class="mini muted">告警只登记命中裁决，不自动发令；解除推进环境版本，旧确认失效。</span>
+    </div>
+    <div style="margin-top:6px">
+      <button class="warn" onclick="demoPrepare()">① 准备演示现场（开票/隔离/许可/工具/名册）</button>
+      <span id="demo-info" class="mini"></span>
+    </div>
+    <div id="alerts" class="mini" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <h3>区域态势 · 在办票据与撤离批次</h3>
+    <div id="tickets"></div>
+  </div>
+</section>
+<aside>
+  <div class="card">
+    <h3>避险点与人员分布</h3>
+    <div id="shelters"></div>
+  </div>
+  <div class="card gate">
+    <h3>复工依据 / 未清项 / 裁决理由</h3>
+    <div id="gate"></div>
+  </div>
+  <div class="card">
+    <h3>裁决流水（全部落库可追溯）</h3>
+    <div id="decisions"></div>
+  </div>
+</aside>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let state=null, demo=null, curBatch=null;
+async function api(path, method='GET', body){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+function fmtTs(ts){ return ts?new Date(ts*1000).toLocaleString('zh-CN',{hour12:false}):'-'; }
+function detailOf(e){ return typeof e.detail==='object'?e.detail.detail:e.detail; }
+
+async function demoPrepare(){
+  try{
+    demo = await api('/api/demo/storm/prepare','POST');
+    $('demo-info').innerHTML = `<span class="green">已就绪 ${demo.ticket_id}｜名册 ${demo.members.join('、')}｜口令已生成（移动端演示用）</span>`;
+    await loadBoard();
+  }catch(e){ alert(detailOf(e)); }
+}
+async function alertIn(){
+  try{ await api('/api/storm/weather-alerts','POST',{areas:[$('wx-area').value], alert_id:'WX'+Date.now().toString().slice(-6)}); }
+  catch(e){ alert(detailOf(e)); }
+  loadBoard();
+}
+async function weatherClear(){
+  try{ await api('/api/storm/weather-clear','POST',{areas:[$('wx-area').value]}); }
+  catch(e){ alert(detailOf(e)); }
+  loadBoard();
+}
+async function evacOrder(tid, alertId){
+  try{ await api(`/api/tickets/${tid}/storm/evacuation-orders`,'POST',{actor:'值班长', alert_id:alertId||null}); }
+  catch(e){ alert(detailOf(e)); }
+  loadBoard();
+}
+async function assignGuard(bid, line, device){
+  const g = prompt(`指派谁到风险点 ${device} 落实监护？（张三/李四/孙七）`,'张三');
+  if(!g) return;
+  try{ await api(`/api/storm/batches/${bid}/risks/${line}/guardian`,'POST',{guardian:g, actor:'值班长'}); }
+  catch(e){ return alert(detailOf(e)); }
+  loadBoard();
+}
+
+async function loadBoard(){
+  state = await api('/api/storm/batches');
+  $('env').textContent = `环境版本 ${state.env_current.digest}（拓扑v${state.env_current.topology_version}/气象#${state.env_current.weather_seq}/告警#${state.env_current.alert_seq}）`;
+  // 告警
+  $('alerts').innerHTML = state.alerts.slice(0,6).map(a=>
+    `<span class="tag ${a.status==='ACTIVE'?'st-ACTIVE':'st-RESUMED'}">${a.alert_id} ${a.level} ${a.areas.join('/')} ${a.status}</span>`).join(' ') || '<span class="muted">暂无告警</span>';
+  // 避险点
+  const dist = {};
+  state.tickets.forEach(t=>t.batches.forEach(b=>Object.assign(dist, b.shelter_distribution)));
+  $('shelters').innerHTML = state.shelters.map(s=>{
+    let n=0; state.tickets.forEach(t=>t.batches.forEach(b=>n+=(b.shelter_distribution[s.code]||0)));
+    return `<div class="shelter-chip">🏠 ${s.name} <b class="${n?'green':'muted'}">${n}</b>/${s.capacity}<br><span class="muted">扫码令牌 ${s.qr}</span></div>`;
+  }).join('');
+  // 票据与批次
+  const box=$('tickets'); box.innerHTML='';
+  if(!state.tickets.length){ box.innerHTML='<div class="muted">无在办票据，先点「准备演示现场」。</div>'; }
+  state.tickets.forEach(t=>{
+    const div=document.createElement('div');
+    div.className='card';
+    div.style.background='#121b28';
+    const hit=t.hit_alerts.map(h=>`<span class="tag st-ACTIVE">告警 ${h.alert_id} 命中 ${h.hit_areas.join('/')}</span>`).join(' ');
+    let bh=`<div class="batch-head"><b>${t.id}</b> ${t.title}
+        <span class="tag st-${t.status}">${t.status}</span>${t.frozen?'<span class="tag st-ACTIVE">冻结</span>':''}
+        ${hit}<br><span class="mini muted">工作区 ${t.work_area.join('、')}</span></div>`;
+    if(!t.batches.length){
+      bh += `<div style="margin-top:6px"><button class="danger" onclick="evacOrder('${t.id}','${(t.hit_alerts[0]||{}).alert_id||''}')">值班长发布撤离令</button></div>`;
+    }
+    t.batches.forEach(b=>{ bh += batchBlock(b); });
+    div.innerHTML=bh;
+    box.appendChild(div);
+  });
+  loadGateAndDecisions();
+}
+
+function batchBlock(b){
+  const stale = b.env_stale;
+  const roster = b.roster.map(r=>{
+    const cls = r.status==='LEFT'?'muted':(r.safe?'green':'red');
+    return `<span class="shelter-chip ${cls}">${r.person}${r.status==='LEFT'?'(已离场)':(r.safe?(' @'+r.shelter):' ✗未到')}</span>`;
+  }).join('');
+  const risks = b.risks.map(r=>`<div class="mini">
+      <span class="tag d-${r.status}">${r.status}</span> ${r.device}
+      <span class="muted">${r.kind}</span>
+      ${r.guardian?`<span class="muted">监护 ${r.guardian}</span>`:`<button class="mini" onclick="assignGuard('${b.id}',${r.line_no},'${r.device}')">指派监护</button>`}
+    </div>`).join('') || '<div class="mini muted">无带电风险点</div>';
+  const tools = b.tools.filter(t=>!t.location_known || t.location_where).map(t=>
+    `<span class="shelter-chip ${t.location_known?'green':'red'}">${t.serial} ${t.location_known?(t.location_where==='SHELTER'?'避险点':t.location_where==='BOX'?'箱内':'?')+'·'+(t.location_holder||''):'去向不明'}</span>`).join('');
+  const cf = Object.entries(b.confirms).map(([role,rows])=>rows.map(r=>
+    `<span class="tag ${r.status==='VALID'?'d-CURRENT':'d-SUPERSEDED'}">${role==='FIELD'?'现场':'调度'} ${r.leader} ${r.env_digest.slice(0,6)} ${r.status}</span>`).join(' ')).join(' ');
+  return `<details ${b.id===curBatch?'open':''} ontoggle="if(this.open)curBatch='${b.id}'">
+    <summary>批次 ${b.id} <span class="tag st-${b.status}">${b.status}</span> #${b.seq}
+      <span class="${stale?'env-diff':'env-same'}">${stale?'依据已变化':'依据一致'}</span></summary>
+    <div class="kv">撤离时环境 <b>${b.env_at_order.digest}</b> ｜ 当前 <b>${b.env_current.digest}</b> ｜
+      原因：${b.reason||''} ｜ 值班长 ${b.leader} ｜ ${fmtTs(b.created_at)}${b.preempt_reason?`<br><span class="red">${b.preempt_reason}</span>`:''}</div>
+    <div style="margin:4px 0"><b class="mini">人员名册（固定快照）：</b><br>${roster}</div>
+    <div style="margin:4px 0"><b class="mini">避险点分布：</b>
+      ${Object.entries(b.shelter_distribution).map(([k,v])=>`<span class="shelter-chip green">${k}: ${v}</span>`).join('')||'<span class="muted">尚无人到达</span>'}</div>
+    <div style="margin:4px 0"><b class="mini">仍带电风险点：</b>${risks}</div>
+    <div style="margin:4px 0"><b class="mini">现场工器具占有：</b>${b.tools.length} 件${tools?'<br>'+tools:''}</div>
+    <div style="margin:4px 0"><b class="mini">双角色放行：</b>${cf||'<span class="muted">均未确认</span>'}</div>
+    <div style="margin:4px 0">
+      <button class="ok" onclick="confirmRole('${b.id}','field')">现场负责人清点确认</button>
+      <button class="ok" onclick="confirmRole('${b.id}','dispatch')">调度核验放行</button>
+      <button onclick="resume('${b.id}')" ${b.gate.can_resume?'':'disabled'}>正式复工</button>
+      <button class="danger" onclick="withdraw('${b.ticket}')">撤销票据（终局）</button>
+    </div>
+  </details>`;
+}
+
+async function confirmRole(bid, role){
+  const leader = prompt(role==='field'?'现场负责人姓名：':'调度员姓名：', role==='field'?'现场负责人A':'调度员B');
+  if(!leader) return;
+  try{ await api(`/api/storm/batches/${bid}/confirms/${role}`,'POST',{leader}); }
+  catch(e){ alert(detailOf(e)); }
+  loadBoard();
+}
+async function resume(bid){
+  try{ await api(`/api/storm/batches/${bid}/resume`,'POST',{actor:'现场负责人A'}); }
+  catch(e){ alert(detailOf(e)); }
+  loadBoard();
+}
+async function withdraw(tid){
+  if(!confirm('确认撤销票据？开放撤离批次将终局（事实保留）。')) return;
+  try{ await api(`/api/tickets/${tid}/withdraw`,'POST',{actor:'调度A',reason:'调度端撤销'}); }
+  catch(e){ alert(detailOf(e)); }
+  loadBoard();
+}
+
+function loadGateAndDecisions(){
+  // 选中最后一个开放批次展示未清项
+  let pick=null;
+  for(const t of state.tickets) for(const b of t.batches)
+    if(['ACTIVE','WAITING_RESUME'].includes(b.status)) pick=b;
+  if(!pick){ $('gate').innerHTML='<div class="muted">无开放撤离批次。</div>'; }
+  else{
+    const g=pick.gate;
+    $('gate').innerHTML=`<div class="mini">批次 <b>${pick.id}</b></div>
+      <ul class="mini">
+        <li class="${g.persons_all_safe?'green':'red'}">人员全员安全：${g.persons_all_safe?'是':'否 '+JSON.stringify(pick.blockers.persons_missing)}</li>
+        <li class="${g.risks_all_guarded?'green':'red'}">风险点落实监护：${g.risks_all_guarded?'是':'否 '+pick.blockers.risks_unguarded.map(r=>r.device).join('、')}</li>
+        <li class="${g.tools_all_known?'green':'red'}">关键器具去向明确：${g.tools_all_known?'是':'否 '+pick.blockers.tools_unknown.map(t=>t.serial).join('、')}</li>
+        <li class="${g.field_confirmed&&g.field_confirms_current_env?'green':'amber'}">现场确认（当前环境）：${g.field_confirmed?(g.field_confirms_current_env?'有效':'已失效'):'未确认'}</li>
+        <li class="${g.dispatch_confirmed&&g.dispatch_confirms_current_env?'green':'amber'}">调度确认（当前环境）：${g.dispatch_confirmed?(g.dispatch_confirms_current_env?'有效':'已失效'):'未确认'}</li>
+        <li class="${g.same_env?'green':'red'}">两项确认同一环境版本：${g.same_env?'是':'否'}</li>
+      </ul>
+      <div class="mini muted">${g.reasons.map(r=>'• '+r.detail).join('<br>')||'全部依据满足，可复工。'}</div>`;
+  }
+  const rows = state.decisions;
+  $('decisions').innerHTML = rows.map(d=>
+    `<div class="row"><span class="${d.accepted?'green':'no'}">[${d.accepted?'接受':'拒绝'}]</span>
+      <b>${d.reason_code}</b> <span class="muted">${d.batch||''} ${d.scene}</span><br>
+      <span class="muted">${d.detail}</span></div>`).join('') || '<div class="muted">暂无裁决</div>';
+}
+
+loadBoard();
+setInterval(loadBoard, 3000);
+</script>
+</body>
+</html>

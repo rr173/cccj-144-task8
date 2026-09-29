@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雷暴撤离 · 移动端</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.55 "PingFang SC","Microsoft YaHei",sans-serif; background:#0f1620; color:#dbe4ee; max-width:560px; margin:0 auto; padding-bottom:30px;}
+  header { padding:12px 16px; background:#16202e; border-bottom:1px solid #263449; position:sticky; top:0; z-index:5;}
+  header h1 { font-size:16px; margin:0; color:#ffb454; }
+  header a { font-size:12px; color:#9fb3c8; }
+  section { padding:10px 14px; }
+  .card { background:#16202e; border:1px solid #263449; border-radius:10px; padding:12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:#ffb454; }
+  button { width:100%; background:#1f6feb; color:#fff; border:0; border-radius:8px; padding:11px; cursor:pointer; font-size:15px; margin:4px 0;}
+  button.warn { background:#b8741a; } button.danger { background:#b8323e; }
+  button.ok { background:#1a7f4b; } button.ghost { background:#2a3a4f; }
+  button:disabled { background:#3a4a5f; cursor:not-allowed; }
+  input,select { width:100%; background:#0b1119; color:#dbe4ee; border:1px solid #33465e; border-radius:8px; padding:10px; font-size:15px; margin:4px 0;}
+  .tag { display:inline-block; padding:1px 8px; border-radius:9px; font-size:12px; margin:1px;}
+  .st-ACTIVE { background:#b8323e; } .st-WAITING_RESUME { background:#1a7f4b; }
+  .st-RESUMED { background:#3a4a5f; } .st-PREEMPTED { background:#7a4fb0; }
+  .st-TERMINATED { background:#44505f; }
+  .d-CURRENT { background:#1a7f4b; } .d-SUPERSEDED { background:#7a6a2a; }
+  .d-DUPLICATE { background:#2a3a4f; } .d-CONFLICT,.d-PENDING { background:#b8323e; }
+  .d-ASSIGNED { background:#8a6d1a; } .d-GUARDED { background:#1a7f4b; }
+  .red { color:#e5534b; } .green { color:#2ea043; } .amber { color:#d4a72c; } .muted { color:#8fa3b8; font-size:13px; }
+  .verdict { border-radius:8px; padding:8px 10px; margin:6px 0; font-size:13.5px; }
+  .verdict.ok { background:#12291c; border:1px solid #1a7f4b; }
+  .verdict.no { background:#2c1620; border:1px solid #b8323e; }
+  .shelter-qr { display:block; width:100%; text-align:left; margin:5px 0; }
+  .person-chip { display:inline-block; padding:3px 9px; border-radius:14px; font-size:13px; margin:2px; background:#1c2c44;}
+  .person-chip.safe { background:#12291c; color:#2ea043; }
+  .person-chip.lost { background:#2c1620; color:#e5534b; }
+  .person-chip.left { opacity:.55; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td { padding:5px 4px; border-bottom:1px solid #22303f; vertical-align:top;}
+  .big { font-size:18px; font-weight:bold; }
+  .m0 { margin:0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⛈ 雷暴撤离 · 移动端</h1>
+  <a href="/storm">调度端态势页（PC）</a>
+</header>
+
+<section class="card">
+  <h3>① 选择撤离批次与本人身份</h3>
+  <select id="batch-sel" onchange="pickBatch()"></select>
+  <input id="person" placeholder="本人姓名（名册成员，如 张三）">
+  <input id="token" placeholder="本人签到口令（名册口令，防代签）">
+  <button class="ghost" onclick="loadMe()">进入我的撤离视图</button>
+  <div id="me-status" class="muted"></div>
+</section>
+
+<section class="card">
+  <h3>② 扫避险点码到达</h3>
+  <div id="shelter-btns"></div>
+  <div class="muted">同一人更换避险点只保留最新有效去向；重复扫码返回首次结果。</div>
+  <div id="ci-verdicts"></div>
+</section>
+
+<section class="card">
+  <h3>③ 现场工器具去向（清点）</h3>
+  <div id="my-tools"></div>
+  <div id="tool-verdicts"></div>
+</section>
+
+<section class="card">
+  <h3>④ 风险点监护确认</h3>
+  <div id="my-risks"></div>
+</section>
+
+<section class="card">
+  <h3>我的裁决记录（拒绝原因可查）</h3>
+  <div id="my-decisions"></div>
+</section>
+<script>
+const $=id=>document.getElementById(id);
+let batches=[], bid=null;
+
+async function api(path, method='GET', body){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+function dText(e){ return typeof e.detail==='object'?e.detail.detail:e.detail; }
+function verdictBox(id, ok, text){
+  const d=document.createElement('div');
+  d.className='verdict '+(ok?'ok':'no');
+  d.innerHTML=ok?'✔ '+text:'✖ '+text;
+  $(id).prepend(d);
+}
+
+async function loadBatches(){
+  const b = await api('/api/storm/batches');
+  batches=[];
+  b.tickets.forEach(t=>t.batches.forEach(x=>batches.push({...x, ticketTitle:t.title})));
+  const sel=$('batch-sel'); const keep=sel.value;
+  sel.innerHTML = batches.length? batches.map(x=>
+    `<option value="${x.id}">${x.id} · ${x.ticketTitle} · ${x.status}</option>`).join('')
+    : '<option value="">（暂无撤离批次，请由值班长发令）</option>';
+  if(keep) sel.value=keep;
+}
+function pickBatch(){
+  bid=$('batch-sel').value;
+  renderShelters();
+}
+async function renderShelters(){
+  try{
+    const b = await api('/api/storm/batches?limit=1');
+    const sh = b.shelters;
+    $('shelter-btns').innerHTML = sh.map(s=>
+      `<button class="shelter-qr ${bid?'':'ok'}" onclick="checkin('${s.qr}')" ${bid?'':'disabled'}>
+        🏠 ${s.name}<br><span class="m0 muted">扫码令牌 ${s.qr}</span></button>`).join('');
+  }catch(e){}
+}
+
+async function checkin(qr){
+  const person=$('person').value.trim(), token=$('token').value.trim();
+  if(!bid||!person||!token) return verdictBox('ci-verdicts',false,'请先选择批次并填写本人姓名与口令');
+  try{
+    const r = await api(`/api/storm/batches/${bid}/checkins`,'POST',{person,token,shelter:qr});
+    if(r.ok){
+      verdictBox('ci-verdicts',true,
+        `${r.person} 已到达 ${r.shelter}（${r.reason_code==='DUPLICATE'?'重复扫码·首次结果':
+          r.reason_code==='SUPERSEDED'?'已更换避险点，旧去向失效':'最新有效去向'}）`);
+    }else{
+      verdictBox('ci-verdicts',false,`${r.reason_code}：${r.detail}`);
+    }
+  }catch(e){ verdictBox('ci-verdicts',false,dText(e)); }
+  loadMe();
+}
+
+async function loadMe(){
+  await loadBatches();
+  if($('batch-sel').value) bid=$('batch-sel').value;
+  renderShelters();
+  const person=$('person').value.trim();
+  if(!bid||!person){ $('me-status').textContent='请选择批次并填写本人姓名'; return; }
+  let v;
+  try{ v = await api(`/api/storm/person/${bid}/${encodeURIComponent(person)}`); }
+  catch(e){ $('me-status').innerHTML=`<span class="red">${dText(e)}</span>`; return; }
+  const b=v.batch, me=v.me;
+  if(!me){ $('me-status').innerHTML='<span class="red">你不在本批次固定名册中（未登记人员）</span>'; return; }
+  $('me-status').innerHTML =
+    `<span class="big ${me.safe?'green':(me.status==='LEFT'?'muted':'red')}">`+
+    (me.status==='LEFT'?'已离场（误入名册，不可签到）':me.safe?('已安全到达 '+me.shelter):'尚未到达避险点')+
+    `</span><br><span class="muted">批次 ${b.id} <span class="tag st-${b.status}">${b.status}</span>`+
+    ` 环境 ${b.env_current.digest}${b.env_stale?'（已变化）':''}</span>`;
+  // 名册
+  const chips = b.roster.map(r=>
+    `<span class="person-chip ${r.status==='LEFT'?'left':(r.safe?'safe':'lost')}">${r.person} ${r.status==='LEFT'?'离场':(r.safe?('@'+r.shelter):'未到')}</span>`).join('');
+  $('me-status').innerHTML += `<div style="margin-top:8px">${chips}</div>`;
+  // 工具去向
+  const tools = v.my_tool_duties;
+  $('my-tools').innerHTML = tools.length? tools.map(t=>{
+    const known=t.location_known;
+    return `<div class="card" style="background:#121b28;margin:6px 0;padding:8px">
+      <b>${t.serial}</b> ${t.name}
+      <span class="tag ${known?'d-GUARDED':'d-PENDING'}">${known?(t.location_where==='SHELTER'?'在避险点':t.location_where==='BOX'?'在箱内':'已知'):'去向不明'}</span>
+      <div class="muted">快照占有：${t.possession}${t.location_holder?('｜当前持有人 '+t.location_holder):''}</div>
+      <div style="display:flex;gap:6px">
+        <button class="ok" style="padding:7px" onclick="sighting('${t.serial}','SHELTER','${person}')">随我在避险点</button>
+        <button class="ghost" style="padding:7px" onclick="sighting('${t.serial}','BOX','${person}')">在工具箱内</button>
+        <button class="danger" style="padding:7px" onclick="sighting('${t.serial}','LOST','${person}')">报去向不明</button>
+      </div></div>`;
+  }).join('') : '<div class="muted">没有需要你申报去向的现场器具（在库锁定件无需申报）。</div>';
+  // 风险点：指派给本人的
+  const mine = b.risks.filter(r=>r.guardian===person);
+  $('my-risks').innerHTML = mine.length? mine.map(r=>
+    `<div class="card" style="background:#121b28;margin:6px 0;padding:8px">
+      风险点 <b>${r.device}</b> <span class="tag d-${r.status}">${r.status}</span>
+      <div class="muted">${r.detail}</div>
+      <button class="warn" onclick="guardConfirm(${r.line_no})">我是 ${person}，确认已落实监护</button>
+    </div>`).join('')
+    : `<div class="muted">你未被指派为风险点监护人。本批风险点：${b.risks.map(r=>r.device+'('+r.status+'/'+(r.guardian||'未指派')+')').join('、')||'无'}</div>`;
+  // 签到史
+  if(v.checkins && v.checkins.length){
+    $('me-status').innerHTML += '<div style="margin-top:8px"><b class="muted">签到去向：</b>'+
+      v.checkins.map(x=>`<span class="tag d-${x.decision}">${x.shelter} ${x.decision}</span>`).join(' ')+'</div>';
+  }
+  // 裁决
+  $('my-decisions').innerHTML = v.decisions.length? v.decisions.map(d=>
+    `<div class="verdict ${d.accepted?'ok':'no'}"><b>${d.reason_code}</b>（${d.scene}）<br>
+      <span class="muted">${d.detail}</span></div>`).join('') : '<div class="muted">暂无与你相关的裁决</div>';
+}
+
+async function sighting(serial, where, holder){
+  const token=$('token').value.trim();
+  try{
+    const r = await api(`/api/storm/batches/${bid}/tool-sightings`,'POST',{serial,where,holder,actor:holder});
+    verdictBox('tool-verdicts', r.ok, `${r.reason_code}：${r.detail}`);
+  }catch(e){ verdictBox('tool-verdicts',false,dText(e)); }
+  loadMe();
+}
+async function guardConfirm(line){
+  const person=$('person').value.trim(), token=$('token').value.trim();
+  try{
+    await api(`/api/storm/batches/${bid}/risks/${line}/confirm`,'POST',{guardian:person,token});
+    verdictBox('my-decisions',true,`GUARDIAN_CONFIRMED：风险点 ${line} 号监护已由本人确认`);
+  }catch(e){ verdictBox('my-decisions',false,dText(e)); }
+  loadMe();
+}
+
+(async function init(){
+  await loadBatches();
+  if(bid) pickBatch(); else renderShelters();
+  setInterval(async()=>{ await loadBatches(); if($('person').value.trim()) loadMe(); }, 4000);
+})();
+</script>
+</body>
+</html>
