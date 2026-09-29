@@ -22,6 +22,7 @@ import domain
 import replay as replay_engine
 import tools as tools_mod
 import metro
+import storm
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
@@ -538,6 +539,7 @@ def verify_core(db, tid, step_id, actor, source='ONLINE'):
             ev(db, tid, actor, 'TICKET_CLOSED', note='恢复送电完成，控制权全部释放', source=source)
             # 工作票关闭：关闭尚未完成的换班
             close_handovers(db, tid, 'TICKET_CLOSED', '工作票已关闭', actor)
+            storm.mark_ticket_terminal(db, tid, actor, '恢复送电完成，作业收工关闭票据')
     return {'ok': True, 'step': step_id, 'status': 'VERIFIED'}
 
 
@@ -1584,10 +1586,13 @@ def void_voucher_core(db, vid, reason, actor):
 
 def create_app(db_path='safety_ticket.db', with_seed=True):
     db = DB(db_path)
+    storm.register_helpers(load_topo_fn=load_topo, get_ticket_fn=get_ticket,
+                           get_steps_fn=get_steps, ev_fn=ev, close_handovers_fn=close_handovers)
     if with_seed:
         seed(db)
         seed_tools(db)
         metro.seed_metro(db)
+        storm.seed_storm(db)
     app = FastAPI(title='配电检修安全票协同系统')
 
     # ---- 拓扑与遥测
@@ -1754,6 +1759,7 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
                 db.x('INSERT INTO steps(id,ticket,seq,phase,kind,device,point,sw,expected,desc) VALUES(?,?,?,?,?,?,?,?,?,?)',
                      (f'{tid}:R{i}', tid, base + i, s['phase'], s['kind'], s['device'], s['point'], s['sw'], s['expected'], s['desc']))
             db.x("UPDATE tickets SET status='RESTORING' WHERE id=?", (tid,))
+            storm.refresh_environments(db, req.actor, '作业收工进入恢复送电阶段，票据状态依据变化', tid)
             ev(db, tid, req.actor, 'WORK_FINISHED',
                restore_order=[s['device'] for s in rest])
             db.commit()
@@ -1833,6 +1839,7 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
                                  f'重新定界（新边界 v{topo.version}）使旧授权作废', req.actor)
             # 边界重算：关闭尚未完成的换班（写权归属与已入账证据不回退）
             close_handovers(db, tid, 'REBASELINED', f'边界重算（新边界 v{topo.version}）', req.actor)
+            storm.refresh_environments(db, req.actor, f'重新定界至 v{topo.version}，旧复工确认失效', tid)
             ev(db, tid, req.actor, 'REBASELINE', snapshot=topo.version,
                carried_verified=carried, rebuilt=rebuilt)
             db.commit()
@@ -1873,6 +1880,7 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
                                  req.actor)
             # 计划取消：关闭尚未完成的换班；残留物理状态与控制锁不回退
             close_handovers(db, tid, 'WITHDRAWN', f"计划取消：{req.reason or '撤回票据'}", req.actor)
+            storm.mark_ticket_terminal(db, tid, req.actor, f'票据撤销：{req.reason or "计划取消"}')
             # 工器具库存锁回滚：票据撤回时尚未出箱的批次锁定整批释放（已生成在途工具箱的不走回滚）
             try:
                 tools_mod.release_ticket_locks(
@@ -2849,6 +2857,7 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
             ev(db, ctrl['ticket'] if ctrl else None, req.actor, 'TELEMETRY_CHANGED',
                device=req.device, state=req.state)
             revalidate_all(db, req.actor)
+            storm.refresh_environments(db, req.actor, f'设备遥测变化（{req.device}={req.state}），复工依据重新核验')
             db.commit()
             return {'ok': True}
 
@@ -2890,6 +2899,7 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
             ev(db, ctrl['ticket'] if ctrl else req.ticket, req.actor, 'TELEMETRY_CHANGED',
                device=gid, action=req.action, point=req.point)
             revalidate_all(db, req.actor)
+            storm.refresh_environments(db, req.actor, f'接地状态变化（{gid} {req.action}），复工依据重新核验')
             db.commit()
             return {'ok': True}
 
@@ -2912,6 +2922,7 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
             set_tag(db, req.device, req.tag, req.action == 'add')
             ev(db, None, req.actor, 'TAG_CHANGED', device=req.device, tag=req.tag, action=req.action)
             revalidate_all(db, req.actor)
+            storm.refresh_environments(db, req.actor, f'标示牌状态变化（{req.device} {req.action}），复工依据重新核验')
             db.commit()
             return {'ok': True}
 
@@ -2939,6 +2950,7 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
                                      lambda p: p['snapshot'] != v and p['status'] in PKG_LIVE_STATES,
                                      f'边界版本改变（拓扑变更至 v{v}），旧授权作废', req.actor)
             revalidate_all(db, req.actor)
+            storm.refresh_environments(db, req.actor, f'网络拓扑变更至 v{v}，旧复工确认失效')
             db.commit()
             return {'ok': True, 'version': v}
 
@@ -3370,6 +3382,122 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
             db.commit()
             return {'ok': True, 'note': '演示数据已复位：召回全部解除、器具回库、证书回到种子 v1'}
 
+    # ============================================================== 雷暴撤离与复工闸门
+    class StormAlertReq(BaseModel):
+        ticket: str
+        severity: str = 'THUNDERSTORM_RED'
+        title: str = '雷暴红色预警命中作业区域'
+        areas: list[str] = []
+        actor: str = '值班长'
+        reason: Optional[str] = None
+        auto_order: bool = False
+        field_leader: str = '陈七'
+
+    class StormOrderReq(BaseModel):
+        alert: Optional[str] = None
+        field_leader: str = '陈七'
+        issued_by: str = '值班长'
+
+    class StormClearReq(BaseModel):
+        actor: str = '气象值班员'
+
+    class StormCheckinReq(BaseModel):
+        person: str
+        shelter: str
+        claimed_by: Optional[str] = None
+        safe: bool = True
+        key: Optional[str] = None
+
+    class StormCorrectReq(BaseModel):
+        person: str
+        shelter: str
+        key: Optional[str] = None
+
+    class StormGuardReq(BaseModel):
+        risk: str
+        guardian: str
+        shelter: Optional[str] = None
+        key: Optional[str] = None
+
+    class StormToolReq(BaseModel):
+        serial: str
+        location: str
+        held_by: Optional[str] = None
+        shelter: Optional[str] = None
+        actor: Optional[str] = None
+        key: Optional[str] = None
+        force_correct: bool = False
+
+    class StormActorReq(BaseModel):
+        actor: str
+        key: Optional[str] = None
+
+    @app.get('/api/storm/board')
+    def storm_board():
+        with db.lock:
+            return storm.board_view(db)
+
+    @app.get('/api/storm/batches/{bid}')
+    def storm_batch(bid: str):
+        with db.lock:
+            return storm.batch_view(db, bid)
+
+    @app.get('/api/storm/decisions')
+    def storm_decisions(batch: Optional[str] = None):
+        with db.lock:
+            return storm.decisions(db, batch)
+
+    @app.post('/api/storm/alerts', status_code=201)
+    def storm_alert(req: StormAlertReq):
+        t = get_ticket(db, req.ticket)
+        areas = req.areas or t['work_area']
+        return storm.create_alert_core(db, req.ticket, req.severity, req.title, areas,
+                                       req.actor, req.reason, False)
+
+    @app.post('/api/storm/alerts/{aid}/clear')
+    def storm_clear(aid: str, req: StormClearReq):
+        return storm.clear_alert_core(db, aid, req.actor)
+
+    @app.post('/api/tickets/{tid}/storm-evacuation')
+    def storm_order(tid: str, req: StormOrderReq):
+        return storm.issue_order_core(db, tid, req.alert, req.field_leader, req.issued_by)
+
+    @app.post('/api/storm/demo/alert-order')
+    def storm_demo_alert_order(req: StormAlertReq):
+        t = get_ticket(db, req.ticket)
+        areas = req.areas or t['work_area']
+        return storm.create_alert_core(db, req.ticket, req.severity, req.title, areas,
+                                       req.actor, req.reason, True)
+
+    @app.post('/api/storm/batches/{bid}/checkins')
+    def storm_checkin(bid: str, req: StormCheckinReq):
+        return storm.checkin_core(db, bid, req.person, req.shelter, req.claimed_by, req.key, req.safe)
+
+    @app.post('/api/storm/batches/{bid}/correct-destination')
+    def storm_correct(bid: str, req: StormCorrectReq):
+        return storm.correct_destination_core(db, bid, req.person, req.shelter, req.key)
+
+    @app.post('/api/storm/batches/{bid}/risk-guards')
+    def storm_guard(bid: str, req: StormGuardReq):
+        return storm.assign_guard_core(db, bid, req.risk, req.guardian, req.shelter, req.key)
+
+    @app.post('/api/storm/batches/{bid}/tool-reports')
+    def storm_tool(bid: str, req: StormToolReq):
+        return storm.report_tool_core(db, bid, req.serial, req.location, req.held_by,
+                                      req.shelter, req.actor, req.key, req.force_correct)
+
+    @app.post('/api/storm/batches/{bid}/field-confirm')
+    def storm_field(bid: str, req: StormActorReq):
+        return storm.field_confirm_core(db, bid, req.actor, req.key)
+
+    @app.post('/api/storm/batches/{bid}/dispatch-confirm')
+    def storm_dispatch(bid: str, req: StormActorReq):
+        return storm.dispatch_confirm_core(db, bid, req.actor, req.key)
+
+    @app.post('/api/storm/batches/{bid}/resume')
+    def storm_resume(bid: str, req: StormClearReq):
+        return storm.resume_core(db, bid, req.actor)
+
     # ---- 页面
     import os
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
@@ -3406,6 +3534,15 @@ def create_app(db_path='safety_ticket.db', with_seed=True):
     def page_metro():
         return FileResponse(os.path.join(static_dir, 'metro.html'))
 
+    @app.get('/storm')
+    def page_storm():
+        return FileResponse(os.path.join(static_dir, 'storm.html'))
+
+    @app.get('/storm-mobile')
+    def page_storm_mobile():
+        return FileResponse(os.path.join(static_dir, 'storm_mobile.html'))
+
+    app.mount('/static', StaticFiles(directory=static_dir), name='static')
     app.state.db = db
     return app
 

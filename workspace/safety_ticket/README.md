@@ -19,12 +19,14 @@ python3 server.py          # http://localhost:8000
 - 审计事件回放：   http://localhost:8000/replay
 - 事故分析报告：   http://localhost:8000/report
 - 外发凭证柜：     http://localhost:8000/voucher
+- 雷暴撤离调度端： http://localhost:8000/storm
+- 雷暴撤离移动端： http://localhost:8000/storm-mobile
 - 接口文档（Swagger）：http://localhost:8000/docs
 
 ## 测试
 
 ```bash
-python3 -m pytest test_system.py test_offline_packages.py test_shift.py test_replay.py test_vouchers.py test_tools.py test_metro.py -q     # 144 个端到端用例
+python3 -m pytest test_system.py test_offline_packages.py test_shift.py test_replay.py test_vouchers.py test_tools.py test_metro.py test_storm.py -q     # 153 个端到端用例
 ```
 
 ## 现场班组工器具借还台
@@ -106,7 +108,32 @@ python3 -m pytest test_system.py test_offline_packages.py test_shift.py test_rep
 
 
 
-分析员选取安全票的一段审计序号（`POST /api/tickets/{tid}/replays`，`from_seq`~`to_seq`），
+## 雷暴撤离与复工闸门
+
+气象告警命中作业区域后，值班长发布撤离令；系统在同一事务中冻结票据并固定**撤离批次、人员名册、
+仍带电风险点、现场工器具占有和各安全票/设备快照阶段**。已发生的撤离、签到、清点、确认均只追加，
+不因告警解除、换班、收工、撤销或第二次告警而删除。
+
+- **移动签到裁决**：成员扫避险点二维码确认到达与本人安全；同一人更换避险点时旧去向置为
+  `SUPERSEDED`，只保留最新一条有效记录。代签（`PROXY_SIGN_FORBIDDEN`）、重复扫码、
+  已离场人员误入（`PERSON_ALREADY_OFFSITE`）和未登记人员（`PERSON_NOT_REGISTERED`）均返回明确原因。
+- **三类复工未清项**：任一在册现场人员未确认安全、关键器具去向不明/去向冲突、带电边界风险未落实监护，
+  现场负责人不能提交清点，调度员也不能放行，票据保持冻结。
+- **工器具去向冲突**：不同人员报告不同位置时先持久化为 `CONFLICT` 并阻断复工；只有本批次现场负责人
+  可 `force_correct` 裁决最新有效去向，旧报告保留为 `SUPERSEDED/RESOLVED` 审计事实。
+- **双角色、同批次、同环境放行**：现场负责人确认人员与器具；调度员核验气象解除、网络拓扑、票据阶段和
+  隔离边界。两项确认必须引用同一撤离批次；气象、拓扑、遥测、标示牌、重新定界等任一依据变化，
+  旧确认标记 `INVALID`，不会删除事实。
+- **并发最终阶段**：第二次告警会把撤离中/待复工批次原子抢占为 `SUPERSEDED`；作业收工或票据撤销把批次
+  终结为 `TICKET_TERMINAL`。DB 锁、部分唯一索引和业务自然键保证只有一个最终阶段。
+- **幂等与恢复**：签到、风险监护、器具清点、双确认、放行均以业务自然键保存首次裁决；相同请求重放返回
+  最初结果，不多写签到/清点/放行记录。全部状态在 SQLite，`POST /api/admin/reopen` 后可还原名册、
+  避险点分布、未清项和有效确认并继续流程。
+- 调度端 `/storm` 展示区域态势、告警、撤离批次、人员分布、未清风险、器具去向和复工依据；
+  移动端 `/storm-mobile` 可扫码签到、补确认安全、纠正去向、安排风险监护、提交/裁决器具清点并查看拒绝原因。
+  页面一键演示：全员到齐双人放行、人员缺失阻断、器具冲突、环境变化失效、第二次告警抢占、重复请求幂等、
+  服务恢复后续作。
+
 系统从事件记录重建该时点的**票据阶段、设备控制权与现场证据**，并逐条显示事件前后状态
 （下界之前的事件折叠为基线投影，窗口内逐条展示）。
 

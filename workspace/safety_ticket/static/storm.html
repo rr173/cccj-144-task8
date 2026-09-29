@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>雷暴撤离与复工闸门</title>
+<style>
+:root{--bg:#0f172a;--panel:#111c33;--card:#16233e;--line:#263757;--text:#e8eefc;--muted:#9db0d0;--blue:#56a8ff;--green:#35d07f;--red:#ff6464;--amber:#ffc247;--purple:#b083ff}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b1224,#17243d);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+header{padding:18px 24px;background:rgba(8,14,28,.92);border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:center;position:sticky;top:0;z-index:3}h1{font-size:20px;margin:0;flex:1}.tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#20365c;color:#b9d5ff;font-size:12px}
+main{padding:20px;display:grid;grid-template-columns:1.05fr .95fr;gap:16px}.card{background:rgba(17,28,51,.92);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:0 12px 30px rgba(0,0,0,.18)}.span2{grid-column:1/-1}h2{font-size:16px;margin:0 0 12px}h3{font-size:14px;margin:14px 0 8px;color:#c7d9f8}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}button,select,input{border:1px solid #314568;background:#0d172b;color:var(--text);border-radius:8px;padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--blue)}button.primary{background:#1d6fd1;border-color:#3b8ff3}button.green{background:#16824d;border-color:#27a867}button.red{background:#a33030;border-color:#d34b4b}button.amber{background:#9b6d13;border-color:#d29c28}button.small{padding:4px 8px;font-size:12px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.metric{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px}.metric b{font-size:22px;display:block}.muted{color:var(--muted);font-size:12px}.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}.pill{padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700}.pill.EVACUATING{background:#522323;color:#ffd4d4}.pill.WAITING_RETURN{background:#543f13;color:#ffe6aa}.pill.DISPATCH_CONFIRMED{background:#174d34;color:#b9ffd8}.pill.RESUMED{background:#173a5a;color:#c7e5ff}.pill.SUPERSEDED,.pill.TICKET_TERMINAL{background:#333;color:#bbb}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid var(--line);padding:7px;text-align:left;vertical-align:top}th{color:#a9bfe3;font-weight:600}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}.log{max-height:280px;overflow:auto}.toast{position:fixed;right:18px;bottom:18px;width:min(560px,45vw);background:#081225;border:1px solid #49699a;border-radius:10px;padding:12px;white-space:pre-wrap;z-index:9;box-shadow:0 18px 50px #0008}.scenario{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.timeline li{margin:7px 0}.dangerbox{border:1px solid #5a2b2b;background:#281620;border-radius:10px;padding:10px}.okbox{border:1px solid #245a3c;background:#12271e;border-radius:10px;padding:10px}a{color:#8fc3ff}
+@media(max-width:980px){main{grid-template-columns:1fr}.grid,.scenario{grid-template-columns:1fr}.toast{width:92vw}}
+</style>
+</head>
+<body>
+<header><h1>雷暴撤离与复工闸门</h1><span class="tag">调度端区域态势</span><a href="/storm-mobile"><button>移动端</button></a><button onclick="load()">刷新</button></header>
+<main>
+<section class="card span2">
+ <div class="row"><h2 style="flex:1;margin:0">一键演示</h2><button class="red" onclick="run('full')">①告警→全员到齐→双人放行→复工</button><button class="amber" onclick="run('missing')">②人员缺失阻断</button><button class="amber" onclick="run('conflict')">③器具去向冲突/负责人裁决</button><button class="amber" onclick="run('env')">④环境版本变化使旧确认失效</button><button class="red" onclick="run('preempt')">⑤第二次告警抢占待复工批次</button><button onclick="run('idempotent')">⑥重复请求幂等</button><button class="green" onclick="run('restart')">⑦服务恢复后继续未完流程</button></div>
+ <p class="muted">每个场景会新建票据，避免互相污染；所有裁决理由均在下方审计与批次详情中追溯。</p>
+</section>
+<section class="card">
+ <h2>手工控制</h2>
+ <div class="row" style="margin-bottom:8px">
+  <select id="ticket"></select><button class="red" onclick="alertOrder(true)">告警并发布撤离令</button><button onclick="alertOrder(false)">只发气象告警</button>
+ </div>
+ <div class="row"><span>当前批次</span><select id="batch"></select><button onclick="clearAlert()">解除当前告警</button><button class="green" onclick="resume()">执行复工</button><button onclick="adminReopen()">模拟服务重启</button></div>
+ <h3>未清项闸门</h3>
+ <div class="row"><button onclick="fieldConfirm()">现场负责人清点确认</button><button class="primary" onclick="dispatchConfirm()">调度员核验放行</button></div>
+ <p class="muted">现场负责人只确认人员与器具；调度员还核验气象解除、网络拓扑、隔离边界和风险监护。两项确认必须绑定同一批次与同一环境版本。</p>
+ <h3>制造变化</h3>
+ <div class="row"><button class="amber" onclick="topologyChange()">改变网络拓扑</button><button class="amber" onclick="withdrawTicket()">撤销当前票据</button><button class="red" onclick="secondAlert()">第二次雷暴告警</button></div>
+</section>
+<section class="card">
+ <h2>区域态势</h2><div id="metrics" class="grid"></div>
+ <h3>气象告警</h3><div id="alerts"></div>
+ <h3>撤离批次</h3><div id="batches"></div>
+</section>
+<section class="card span2"><h2>最新批次详情：人员分布 / 风险 / 器具 / 复工依据</h2><div id="detail">暂无批次</div></section>
+<section class="card span2"><h2>持久化裁决流水</h2><div id="decisions" class="log"></div></section>
+</main>
+<div id="toast" class="toast" style="display:none"></div>
+<script>
+let state={batches:[],alerts:[],roster:[],shelters:[]};
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function toast(x,ok=true){const t=document.getElementById('toast');t.style.display='block';t.style.borderColor=ok?'#2c7a4e':'#b34747';t.textContent=typeof x==='string'?x:JSON.stringify(x,null,2);setTimeout(()=>t.style.display='none',6500)}
+async function api(method,url,body){const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const data=await r.json().catch(()=>({}));if(!r.ok){toast((data.detail&&(data.detail.detail||data.detail.reason_code)||JSON.stringify(data)),false);throw data}return data}
+function statusPill(s){return `<span class="pill ${s}">${s}</span>`}
+async function load(){state=await api('GET','/api/storm/board');renderTickets();renderBoard();await renderDetail();renderDecisions()}
+function renderTickets(){const ts=document.getElementById('ticket');const cur=ts.value;ts.innerHTML='';state.batches.forEach(b=>{const o=document.createElement('option');o.value=b.ticket;o.textContent=`${b.ticket} · ${b.status}`;ts.appendChild(o)});if(cur)ts.value=cur;const bs=document.getElementById('batch');const bc=bs.value;bs.innerHTML='';state.batches.forEach(b=>{const o=document.createElement('option');o.value=b.id;o.textContent=`${b.id} / ${b.ticket} / ${b.status}`;bs.appendChild(o)});if(bc)bs.value=bc}
+function renderBoard(){const open=state.batches.filter(b=>['EVACUATING','WAITING_RETURN','DISPATCH_CONFIRMED'].includes(b.status));const missing=open.reduce((n,b)=>n+(b.open_items?.missing_persons?.length||0),0);const tools=open.reduce((n,b)=>n+(b.open_items?.unknown_tools?.length||0)+(b.open_items?.conflict_tools?.length||0),0);const risks=open.reduce((n,b)=>n+(b.open_items?.unguarded_risks?.length||0),0);document.getElementById('metrics').innerHTML=`<div class=metric><b>${state.alerts.filter(a=>a.status==='ACTIVE').length}</b><span class=muted>有效告警</span></div><div class=metric><b>${open.length}</b><span class=muted>未结束批次</span></div><div class=metric><b class=${missing?'bad':'ok'}>${missing}</b><span class=muted>未确认安全</span></div><div class=metric><b class=${tools||risks?'bad':'ok'}>${tools}/${risks}</b><span class=muted>器具/风险未清</span></div>`;document.getElementById('alerts').innerHTML=table(['id','ticket','级别','状态','区域','时标'],state.alerts.slice(0,8).map(a=>[a.id,a.ticket,a.severity,statusPill(a.status),(a.areas||[]).join(','),new Date(a.issued_at*1000).toLocaleString()]));document.getElementById('batches').innerHTML=table(['批次','票据','阶段','人员','器具','风险','环境','负责人'],state.batches.slice(0,10).map(b=>[b.id,b.ticket,statusPill(b.status),`${b.checkins.length}/${b.roster.filter(p=>p.onsite).length}`,b.all_tools_located?'清':'未清',b.all_risks_guarded?'护':'未护',b.env_version,b.field_leader]))}
+function table(heads,rows){if(!rows.length)return '<p class=muted>暂无</p>';return '<table><thead><tr>'+heads.map(h=>`<th>${h}</th>`).join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(c=>`<td>${esc(c)}</td>`).join('')+'</tr>').join('')+'</tbody></table>'}
+async function selectedBatch(){const id=document.getElementById('batch').value;return id?api('GET',`/api/storm/batches/${id}`):null}
+async function renderDetail(){const b=await selectedBatch();const el=document.getElementById('detail');if(!b){el.innerHTML='<p class=muted>请选择批次</p>';return}const oi=b.open_items;el.innerHTML=`<div class=row><h3 style="margin:0;flex:1">${b.id} ${statusPill(b.status)}</h3><span class=mono>topo=${b.snapshot_topo} env=${b.env_version} hash=${b.env_hash.slice(0,12)}</span>${b.terminal_reason?`<span class="bad">${esc(b.terminal_reason)}</span>`:''}</div>
+<div class=grid><div class=metric><b>${b.all_accounted_for?'全员到齐':'未齐'}</b><span class=muted>人员</span></div><div class=metric><b class=${b.all_tools_located?'ok':'bad'}>${b.tools.length-b.open_items.unknown_tools.length-b.open_items.conflict_tools.length}/${b.tools.length}</b><span class=muted>器具定位</span></div><div class=metric><b class=${b.all_risks_guarded?'ok':'bad'}>${oi.guarded_risks.length}/${b.risks.length}</b><span class=muted>风险监护</span></div><div class=metric><b>${b.field_confirm?'现场✓':'现场—'} / ${b.dispatch_confirm?'调度✓':'调度—'}</b><span class=muted>双确认</span></div></div>
+<h3>避险点人员分布</h3>${table(['避险点','人员','角色','到达时间'],b.distribution.flatMap(d=>d.people.map(p=>[d.name,p.name,p.role,new Date(p.at*1000).toLocaleString()])))}
+<h3>签到/换点/拒绝事实</h3>${table(['记录','人员','避险点','状态','安全','原因'],(b.all_checkins||[]).map(c=>[c.id,c.person_name||c.person,c.shelter_name||c.shelter,c.status,c.safe?'已确认':(c.safe===0?'未确认':'-'),c.reason_code||c.detail||'']))}
+<h3 class=bad>未确认人员</h3>${table(['人员','原因'],oi.missing_persons.map(x=>[x.name,x.reason]))}
+<h3>带电风险与监护</h3>${table(['风险','设备','带电侧','监护','裁决'],b.risks.map(r=>{const g=b.risk_guards.find(x=>x.risk_id===r.id);return [r.id,r.device,(r.live_sides||[]).join(',')||'开关带电',g?`${g.guardian_name||g.guardian}@${g.shelter_name||g.shelter||'现场'}`:'<span class=bad>未落实</span>',g?g.status:'阻断复工']}))}
+<h3>工器具占有与去向</h3>${table(['编号','型号','撤离时状态','最新去向','持有人','裁决'],b.tools.map(t=>{const r=b.tool_reports.find(x=>x.serial===t.serial);const c=oi.conflict_tools.find(x=>x.serial===t.serial);return [t.serial,t.code,t.kind,c?'<span class=bad>冲突</span>':(r?r.location:'<span class=bad>不明</span>'),r?r.held_by||'-':t.holder||'-',c?esc(c.reason):(r?r.status:'UNKNOWN')]}))}
+<h3>器具清点裁决事实</h3>${table(['记录','编号','位置','持有人','状态','原因'],(b.all_tool_reports||[]).map(r=>[r.id,r.serial,r.location,r.held_by||'-',r.status,r.reason_code||r.detail||'']))}
+<h3>复工依据</h3>${table(['角色','状态','环境版本','依据摘要','原因'],[[ '现场',b.field_confirm?.status||'—',b.field_confirm?.env_version||'—',b.field_confirm?b.field_confirm.env_hash.slice(0,12):'—',b.field_confirm?.reason_code||''],['调度',b.dispatch_confirm?.status||'—',b.dispatch_confirm?.env_version||'—',b.dispatch_confirm?b.dispatch_confirm.env_hash.slice(0,12):'—',b.dispatch_confirm?.reason_code||'']] )}`}
+async function renderDecisions(){const rows=await api('GET','/api/storm/decisions');document.getElementById('decisions').innerHTML=table(['时间','批次','场景','结果','原因','详情'],rows.slice(0,100).map(r=>[new Date(r.created_at*1000).toLocaleTimeString(),r.batch||'',r.scene,`<span class=${r.result==='ACCEPTED'?'ok':'bad'}>${r.result}</span>`,r.reason_code||'',r.detail||'']))}
+function ticketId(){return document.getElementById('ticket').value||state.batches[0]?.ticket}function batchId(){return document.getElementById('batch').value||state.batches[0]?.id}
+async function alertOrder(auto){const tid=ticketId();if(!tid)return toast('请先选择/创建票据');await api('POST',auto?`/api/storm/demo/alert-order`:'/api/storm/alerts',{ticket:tid});await load()}async function clearAlert(){const b=await selectedBatch();if(!b?.alert)return;await api('POST',`/api/storm/alerts/${b.alert}/clear`,{actor:'气象值班员'});await load()}
+async function fieldConfirm(){await api('POST',`/api/storm/batches/${batchId()}/field-confirm`,{actor:'陈七'});await load()}async function dispatchConfirm(){await api('POST',`/api/storm/batches/${batchId()}/dispatch-confirm`,{actor:'调度员'});await load()}async function resume(){await api('POST',`/api/storm/batches/${batchId()}/resume`,{actor:'值班长'});await load()}async function topologyChange(){await api('POST','/sim/topology',{op:'add_edge',a:'N1',b:'N2'});await load()}async function withdrawTicket(){await api('POST',`/api/tickets/${ticketId()}/withdraw`,{actor:'调度员',reason:'演示票据撤销并发'});await load()}async function secondAlert(){await alertOrder(false)}async function adminReopen(){await api('POST','/api/admin/reopen',{});toast('进程连接已重建：从 SQLite 还原名册、分布、未清项和有效确认');await load()}
+// 场景脚本在 /static/storm_demo.js
+async function run(name){await stormDemo(name,api,load,toast)}
+</script>
+<script src="/static/storm_demo.js"></script>
+</body></html>
