@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>调度端 · 配电检修安全票协同系统</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; background:#0f1620; color:#dbe4ee; }
+  header { padding:10px 18px; background:#16202e; border-bottom:1px solid #263449; display:flex; gap:16px; align-items:center;}
+  header h1 { font-size:17px; margin:0; color:#7fd0ff; }
+  header a { color:#9fb3c8; font-size:13px; }
+  main { display:grid; grid-template-columns: 1fr 460px; gap:10px; padding:10px; }
+  .card { background:#16202e; border:1px solid #263449; border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:#7fd0ff; }
+  #svg { width:100%; background:#0b1119; border-radius:8px; border:1px solid #263449; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:13px; margin:2px;}
+  button:hover { background:#388bfd; }
+  button.ghost { background:#2a3a4f; }
+  button.danger { background:#b8323e; }
+  button:disabled { background:#3a4a5f; cursor:not-allowed; }
+  input,select { background:#0b1119; color:#dbe4ee; border:1px solid #33465e; border-radius:5px; padding:4px 8px; font-size:13px; margin:2px;}
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { padding:4px 6px; border-bottom:1px solid #22303f; text-align:left; vertical-align:top;}
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11.5px; margin:1px;}
+  .st-ISOLATING { background:#8a6d1a; } .st-PERMITTED { background:#1a7f4b; }
+  .st-RESTORING { background:#7a4fb0; } .st-CLOSED { background:#3a4a5f; }
+  .st-WITHDRAWN { background:#5a3038; } .frozen { background:#b8323e; }
+  #events { max-height:260px; overflow-y:auto; font-size:12px; font-family:ui-monospace,monospace;}
+  #events div { padding:2px 4px; border-bottom:1px solid #1c2836; white-space:pre-wrap;}
+  .legend span { margin-right:12px; font-size:12px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:middle;}
+  #boundary-view { font-size:12.5px; white-space:pre-wrap; background:#0b1119; padding:8px; border-radius:6px; max-height:180px; overflow-y:auto;}
+  .bar { background:#22303f; border-radius:4px; height:8px; width:90px; display:inline-block; vertical-align:middle;}
+  .bar i { display:block; height:8px; border-radius:4px; background:#1a7f4b; }
+  .pk-ACTIVE { background:#1f6feb; } .pk-PARTIAL { background:#8a6d1a; }
+  .pk-COMPLETED { background:#1a7f4b; } .pk-VOID,.pk-EXPIRED { background:#5a3038; }
+  .pk-SUPERSEDED { background:#4a4458; }
+  .ev-PENDING { color:#6b7a8d; } .ev-WAITING { color:#d4a72c; }
+  .ev-ACCEPTED { color:#2ea043; } .ev-REJECTED,.ev-DUP_CONFLICT { color:#e5534b; }
+  .chainrow { display:grid; grid-template-columns: repeat(4,1fr); gap:4px; margin:4px 0; font-size:11px;}
+  .chaincell { border:1px solid #2a3a4f; border-radius:5px; padding:3px 5px; min-height:34px;}
+  .chaincell b { display:block; }
+  #pkg-detail { max-height:420px; overflow:auto; }
+  .scope-line { font-size:12px; color:#9fb3c8; margin:2px 0;}
+  .cursor-bar { font-family:ui-monospace,monospace; font-size:11px; color:#8fa3b8; margin-top:4px;}
+  details summary { cursor:pointer; color:#7fd0ff; font-size:13px; margin:4px 0;}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ 配电检修安全票协同系统 · 调度端</h1>
+  <a href="/field" target="_blank">→ 现场操作页面</a>
+  <a href="/shift" target="_blank">→ 值守班组换班接续台</a>
+  <a href="/replay" target="_blank">→ 审计事件回放</a>
+  <a href="/report" target="_blank">→ 事故分析报告</a>
+  <a href="/voucher" target="_blank">→ 外发凭证柜</a>
+  <a href="/metro" target="_blank">→ 计量检定与批次召回</a>
+  <span id="topo-ver" style="margin-left:auto;font-size:12px;color:#9fb3c8"></span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h3>拓扑视图（点击设备圈定工作区）</h3>
+      <div class="legend">
+        <span><i class="dot" style="background:#e5534b"></i>带电</span>
+        <span><i class="dot" style="background:#2ea043"></i>停电</span>
+        <span><i class="dot" style="background:#d4a72c"></i>已接地</span>
+        <span><i class="dot" style="background:#1f6feb"></i>已选工作区</span>
+        <span>◇ 断开开关 &nbsp;◆ 闭合开关 &nbsp;◎ 接地线</span>
+      </div>
+      <svg id="svg" viewBox="0 0 1120 400"></svg>
+    </div>
+    <div class="card">
+      <h3>工作区与边界推导</h3>
+      <div>已选工作区：<b id="work-list" style="color:#7fb0ff">（点击上图设备）</b>
+        <button class="ghost" onclick="clearWork()">清空</button>
+        <button onclick="derive()">推导安全边界</button>
+      </div>
+      <div id="boundary-view">尚未推导</div>
+      <div style="margin-top:6px">
+        <input id="t-title" placeholder="票据标题，如：F2段线路检修" size="24">
+        <input id="t-user" placeholder="调度员" size="8" value="调度员A">
+        <button onclick="createTicket()">开具安全票</button>
+        <span id="create-msg"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>模拟设备接口（一次设备仿真）</h3>
+      <div>
+        <select id="sim-dev"></select>
+        <button onclick="simSwitch('OPEN')">分闸</button>
+        <button onclick="simSwitch('CLOSED')">合闸</button>
+        <button onclick="simGround('install')">装接地线</button>
+        <button onclick="simGround('remove')">拆接地线</button>
+        <button onclick="simTag()">摘/挂“检修中”牌</button>
+        <label style="font-size:12px"><input type="checkbox" id="sim-force"> 强制（模拟误操作）</label>
+        <input id="sim-ticket" placeholder="票据号(解锁)" size="10">
+      </div>
+      <div style="margin-top:4px">
+        拓扑变更：
+        <input id="te-a" placeholder="设备A" size="8" value="F1"><input id="te-b" placeholder="设备B" size="8" value="F3">
+        <button onclick="simTopo('add_edge')">增加连线</button>
+        <button onclick="simTopo('remove_edge')">拆除连线</button>
+        <span id="sim-msg" style="font-size:12px;color:#d4a72c"></span>
+      </div>
+    </div>
+  </section>
+  <aside>
+    <div class="card">
+      <h3>安全票</h3>
+      <table id="tickets"><thead><tr><th>票据</th><th>状态</th><th>进度</th><th>操作</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h3>审计事件流</h3>
+      <div id="events"></div>
+    </div>
+  </aside>
+</main>
+<section style="padding:0 10px 10px">
+  <div class="card">
+    <h3>📡 无网作业授权包</h3>
+    <div class="scope-line">在上方选中一张安全票后，可把<b>连续指令段</b>连同电网版本/执行者/监护者/截止时间一次性下发；断网期间移动终端以本地证据链作业，恢复后整包事务裁决。</div>
+    <div style="margin:6px 0">
+      票据：<select id="pkg-ticket" style="min-width:230px"></select>
+      连续指令段：步骤 <input id="pkg-from" type="number" min="1" value="1" style="width:64px"> 至
+      <input id="pkg-to" type="number" min="1" value="1" style="width:64px">
+      执行者 <input id="pkg-exec" value="张三" size="7">
+      监护者 <input id="pkg-guard" value="李四" size="7">
+      截止时间
+      <select id="pkg-deadline"><option value="3600">1 小时后</option><option value="14400">4 小时后</option>
+        <option value="1">1 毫秒后（演示授权超时）</option></select>
+      <button onclick="issuePkg()">一次性下发授权包</button>
+      <button class="ghost" onclick="loadPkgs()">刷新</button>
+    </div>
+    <div id="pkg-msg" style="font-size:12.5px"></div>
+    <table id="pkgs" style="margin-top:8px"><thead><tr>
+      <th>授权包</th><th>授权范围（连续指令段）</th><th>电网版本</th><th>执行者/监护者</th>
+      <th>截止</th><th>状态</th><th>链路连续性 / 同步游标</th><th>裁决明细</th></tr></thead><tbody></tbody></table>
+    <div id="pkg-detail"></div>
+  </div>
+</section>
+<script>
+let topo=null, work=new Set(), lastEventSeq=0, derived=null;
+const $=id=>document.getElementById(id);
+
+async function api(path, method='GET', body){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+function actor(){ return $('t-user').value||'调度员'; }
+
+async function refreshTopo(){
+  topo = await api('/api/topology');
+  $('topo-ver').textContent = `拓扑版本 v${topo.version}`;
+  draw();
+}
+function devColor(id){
+  if(work.has(id)) return '#1f6feb';
+  const grounded = topo.grounds.some(g=>g[0]===id);
+  if(grounded) return '#d4a72c';
+  return topo.energized.includes(id) ? '#e5534b' : '#2ea043';
+}
+function draw(){
+  const svg=$('svg'); const NS='http://www.w3.org/2000/svg';
+  svg.innerHTML='';
+  const el=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
+  for(const [a,b] of topo.edges){
+    const A=topo.devices[a],B=topo.devices[b];
+    svg.appendChild(el('line',{x1:A.x,y1:A.y,x2:B.x,y2:B.y,stroke:'#33465e','stroke-width':2}));
+  }
+  for(const g of topo.grounds){
+    const d=topo.devices[g[0]];
+    const t=el('text',{x:d.x,y:d.y+34,'text-anchor':'middle','font-size':13,fill:'#d4a72c'});
+    t.textContent=`◎接地(${g[2]})`; svg.appendChild(t);
+  }
+  for(const [id,d] of Object.entries(topo.devices)){
+    const g=el('g',{cursor:'pointer'});
+    g.onclick=()=>{ work.has(id)?work.delete(id):work.add(id); derived=null; draw(); showWork(); };
+    const c=devColor(id);
+    if(d.kind==='switch'){
+      const s=d.state==='CLOSED'?'◆':'◇';
+      const t=el('text',{x:d.x,y:d.y+6,'text-anchor':'middle','font-size':22,fill:c}); t.textContent=s; g.appendChild(t);
+    } else {
+      const r=d.kind==='source'?13:(d.kind==='bus'?10:8);
+      g.appendChild(el('circle',{cx:d.x,cy:d.y,r,fill:c,stroke:'#0b1119','stroke-width':2}));
+    }
+    const n=el('text',{x:d.x,y:d.y-16,'text-anchor':'middle','font-size':12,fill:'#dbe4ee'}); n.textContent=`${id} ${d.name}`; g.appendChild(n);
+    const st=el('text',{x:d.x,y:d.y+20,'text-anchor':'middle','font-size':10,fill:'#8fa3b8'});
+    st.textContent=(d.tags||[]).join(' '); g.appendChild(st);
+    svg.appendChild(g);
+  }
+}
+function showWork(){ $('work-list').textContent=[...work].join('、')||'（点击上图设备）'; }
+function clearWork(){ work.clear(); derived=null; draw(); showWork(); $('boundary-view').textContent='尚未推导'; }
+
+async function derive(){
+  try{
+    derived = await api('/api/derive','POST',{work_area:[...work]});
+    $('boundary-view').textContent =
+      `必须断开开关（按停电顺序）：${derived.switches.map(s=>s.device).join(' → ')}\n`+
+      `接地线：${derived.grounds.map(g=>`${g.id} 装于${g.point}`).join('；')}\n`+
+      `禁止操作边界：${derived.forbidden.map(f=>`${f.device}(${f.label})`).join('；')}\n`+
+      `隔离区：${derived.zone.join('、')}\n`+
+      (derived.control_conflict?`⚠ 控制权冲突：${derived.control_conflict.device} 受 ${derived.control_conflict.ticket} 控制`:'控制权可用');
+  }catch(e){ $('boundary-view').textContent='推导失败：'+e.detail; }
+}
+async function createTicket(){
+  try{
+    const t=await api('/api/tickets','POST',{title:$('t-title').value||'检修工作', work_area:[...work], created_by:actor()});
+    $('create-msg').textContent=`已开票 ${t.id}`; $('create-msg').style.color='#2ea043';
+    clearWork(); refreshTickets();
+  }catch(e){ $('create-msg').textContent='开票失败：'+e.detail; $('create-msg').style.color='#e5534b'; }
+}
+async function refreshTickets(){
+  const ts=await api('/api/tickets');
+  const tb=$('tickets').querySelector('tbody'); tb.innerHTML='';
+  for(const t of ts){
+    const tr=document.createElement('tr');
+    const pct=t.steps_total?Math.round(100*t.steps_done/t.steps_total):0;
+    const ops=[];
+    if(t.status==='ISOLATING'&&!t.frozen) ops.push(`<button onclick="act('${t.id}','permit')">许可开工</button>`);
+    if(t.status==='PERMITTED') ops.push(`<button onclick="act('${t.id}','finish-work')">收工</button>`);
+    if(['ISOLATING','PERMITTED','RESTORING'].includes(t.status)){
+      ops.push(t.frozen?`<button onclick="act('${t.id}','unfreeze')">解冻</button>`:`<button class="ghost" onclick="act('${t.id}','freeze')">冻结</button>`);
+      if(t.frozen) ops.push(`<button class="ghost" onclick="act('${t.id}','rebaseline')">重新基线</button>`);
+      ops.push(`<button class="danger" onclick="act('${t.id}','withdraw')">撤回</button>`);
+    }
+    if(t.status==='WITHDRAWN') ops.push(`<button class="ghost" onclick="act('${t.id}','purge-control')">清理控制权</button>`);
+    tr.innerHTML=`<td><b>${t.id}</b><br>${t.title}<br><span style="color:#8fa3b8;font-size:11px">${t.work_area.join('、')}</span></td>
+      <td><span class="tag st-${t.status}">${t.status}</span>${t.frozen?'<span class="tag frozen">冻结</span>':''}<br>
+        <span style="font-size:11px;color:#d4a72c">${t.freeze_reason||''}</span></td>
+      <td>${t.steps_done}/${t.steps_total}<br><span class="bar"><i style="width:${pct}%"></i></span></td>
+      <td>${ops.join('')}</td>`;
+    tb.appendChild(tr);
+  }
+}
+async function act(tid,op){
+  const reason=(op==='freeze'||op==='withdraw')?prompt('原因/说明:')||'':null;
+  try{ await api(`/api/tickets/${tid}/${op}`,'POST',{actor:actor(),reason}); }
+  catch(e){ alert(e.detail); }
+  refreshTickets(); refreshEvents();
+}
+async function simSwitch(state){
+  try{
+    await api('/sim/switch','POST',{device:$('sim-dev').value,state,ticket:$('sim-ticket').value||null,actor:actor(),force:$('sim-force').checked});
+    $('sim-msg').textContent='操作成功';
+  }catch(e){ $('sim-msg').textContent='拒绝：'+e.detail; }
+  refreshTopo();
+}
+async function simGround(action){
+  const dev=$('sim-dev').value;
+  try{
+    await api('/sim/ground','POST',{point:dev,sw:dev,action,ticket:$('sim-ticket').value||null,actor:actor(),force:$('sim-force').checked});
+    $('sim-msg').textContent='操作成功';
+  }catch(e){ $('sim-msg').textContent='拒绝：'+e.detail; }
+  refreshTopo();
+}
+async function simTag(){
+  const dev=$('sim-dev').value, d=topo.devices[dev];
+  const has=(d.tags||[]).includes('检修中');
+  try{ await api('/sim/tag','POST',{device:dev,tag:'检修中',action:has?'remove':'add',actor:actor(),force:$('sim-force').checked}); }catch(e){ $('sim-msg').textContent='拒绝：'+e.detail; }
+  refreshTopo();
+}
+async function simTopo(op){
+  try{ await api('/sim/topology','POST',{op,a:$('te-a').value,b:$('te-b').value,actor:actor()}); $('sim-msg').textContent='拓扑已变更'; }
+  catch(e){ $('sim-msg').textContent='拒绝：'+e.detail; }
+  refreshTopo();
+}
+async function refreshEvents(){
+  const es=await api('/api/events?since='+lastEventSeq);
+  if(!es.length) return;
+  lastEventSeq=Math.max(lastEventSeq,...es.map(e=>e.seq));
+  const box=$('events');
+  for(const e of es.reverse()){
+    const d=document.createElement('div');
+    const p=JSON.parse(e.payload||'{}');
+    d.textContent=`#${e.seq} [${e.type}] ${e.ticket||'-'} ${e.actor} ${JSON.stringify(p)}`;
+    if(e.type==='FREEZE'||e.type==='SAFETY_ALARM') d.style.color='#e5534b';
+    box.prepend(d);
+  }
+}
+async function fillSimDevices(){
+  const sel=$('sim-dev'); sel.innerHTML='';
+  for(const id of Object.keys(topo.devices)){ const o=document.createElement('option'); o.value=id; o.textContent=`${id} ${topo.devices[id].name}`; sel.appendChild(o);}
+}
+async function tick(){ await refreshTopo(); await refreshTickets(); await refreshEvents(); }
+refreshTopo().then(fillSimDevices); showWork();
+setInterval(tick, 2500);
+
+// ---------------- 无网作业授权包
+function fmtDeadline(ms){ return new Date(ms).toLocaleString('zh-CN',{hour12:false}); }
+async function fillPkgTickets(){
+  const ts=await api('/api/tickets');
+  const sel=$('pkg-ticket'); const cur=sel.value;
+  sel.innerHTML='';
+  for(const t of ts){
+    const o=document.createElement('option');
+    o.value=t.id; o.textContent=`${t.id} ${t.title} [${t.status}${t.frozen?'/冻结':''}] 步骤${t.steps_total}`;
+    o.dataset.total=t.steps_total; sel.appendChild(o);
+  }
+  if(cur) sel.value=cur;
+}
+$('pkg-ticket').onchange=loadPkgs;
+async function issuePkg(){
+  const tid=$('pkg-ticket').value; if(!tid){ alert('请先选择安全票'); return; }
+  const minutes=parseInt($('pkg-deadline').value,10);
+  const body={seg_from:+$('pkg-from').value, seg_to:+$('pkg-to').value,
+    executor:$('pkg-exec').value.trim(), guardian:$('pkg-guard').value.trim(),
+    deadline:Date.now()+minutes*60*1000, issued_by:actor()};
+  try{
+    const p=await api(`/api/tickets/${tid}/offline-packages`,'POST',body);
+    $('pkg-msg').innerHTML=`<span style="color:#2ea043">已下发 ${p.id}，授权范围摘要 ${p.scope_hash}，证据链长度 ${p.records_total}</span>`;
+    await loadPkgs();
+  }catch(e){ $('pkg-msg').innerHTML=`<span style="color:#e5534b">下发失败：${e.detail}</span>`; }
+}
+async function loadPkgs(){
+  const tid=$('pkg-ticket').value;
+  const tb=$('pkgs').querySelector('tbody'); tb.innerHTML='';
+  $('pkg-detail').innerHTML='';
+  if(!tid) return;
+  let ps; try{ ps=await api(`/api/tickets/${tid}/offline-packages`); }catch(e){ return; }
+  for(const p of ps){
+    const tr=document.createElement('tr'); tr.style.cursor='pointer';
+    const b=p.by_status;
+    const contColor=p.chain_continuous?'#2ea043':(b.WAITING||b.PENDING?'#d4a72c':'#e5534b');
+    tr.innerHTML=`<td><b>${p.id}</b></td>
+      <td>步骤 ${p.seg_from}→${p.seg_to}（${p.phase}）<br><span style="font-size:11px;color:#8fa3b8">scope ${p.scope_hash}</span></td>
+      <td>v${p.snapshot}</td>
+      <td>${p.executor} / ${p.guardian}</td>
+      <td style="font-size:11px">${fmtDeadline(p.deadline)}</td>
+      <td><span class="tag pk-${p.status}">${p.status}</span>${p.void_reason?`<br><span style="font-size:10.5px;color:#e5534b">${p.void_reason}</span>`:''}</td>
+      <td style="color:${contColor}">${p.chain_continuous?'连续':(p.first_gap?`缺口#${p.first_gap}`:'断裂')}<br>
+        <span style="font-size:11px">游标 ${p.sync_cursor}/${p.records_total}${p.race_lost?` ·竞争负${p.race_lost}`:''}</span></td>
+      <td style="font-size:11px">
+        <span class="ev-PENDING">⬜未传 ${b.PENDING}</span>
+        <span class="ev-WAITING">⏸待补 ${b.WAITING}</span>
+        <span class="ev-ACCEPTED">✔采纳 ${b.ACCEPTED}</span>
+        <span class="ev-REJECTED">✖驳回 ${b.REJECTED+b.DUP_CONFLICT}</span>
+      </td>`;
+    tr.onclick=()=>showPkgDetail(p.id, tr);
+    tb.appendChild(tr);
+  }
+}
+async function showPkgDetail(pid, tr){
+  selectedPkgId=pid;
+  const p=await api('/api/offline-packages/'+pid);
+  const box=$('pkg-detail');
+  document.querySelectorAll('#pkgs tbody tr').forEach(x=>x.style.background='');
+  if(tr) tr.style.background='#1c2c44';
+  const byStep={};
+  for(const r of p.records){ (byStep[r.payload.step]=byStep[r.payload.step]||[]).push(r); }
+  let html=`<details open><summary>授权包 ${p.id} · 逐记录裁决详情</summary>
+    <div class="scope-line">授权范围：${p.ticket} 步骤 ${p.seg_from}→${p.seg_to}｜电网版本 v${p.snapshot}（当前 v${topo.version}）｜执行者 ${p.executor}｜监护者 ${p.guardian}｜截止 ${fmtDeadline(p.deadline)}</div>
+    <div class="scope-line">链路连续性：<b style="color:${p.chain_continuous?'#2ea043':'#e5534b'}">${p.chain_continuous?'连续':'存在缺口/驳回'}</b>
+      ｜同步游标：<b>${p.sync_cursor}/${p.records_total}</b>｜状态 <span class="tag pk-${p.status}">${p.status}</span></div>`;
+  for(const s of p.steps){
+    html+=`<div style="margin-top:8px"><b>步骤 ${s.seq} · ${s.desc}</b> <span class="st-${s.status}" style="font-size:11px">${s.status}</span>`;
+    html+='<div class="chainrow">';
+    for(const typ of ['SCAN','LIVE','EXEC','GUARD']){
+      const r=(byStep[s.seq]||[]).find(x=>x.payload.type===typ);
+      const names={SCAN:'扫码',LIVE:'设备实况',EXEC:'执行确认',GUARD:'监护确认'};
+      if(!r){ html+=`<div class="chaincell ev-PENDING"><b>⬜ ${names[typ]}</b>未上传</div>`; continue; }
+      const extra=r.payload.scanned?`扫码 ${r.payload.scanned}`:
+        (r.payload.device_state?`位置 ${r.payload.device_state}`:
+        (r.payload.grounded!==null&&r.payload.grounded!==undefined?`接地 ${r.payload.grounded}/带电 ${r.payload.energized}`:
+        `by ${r.payload.actor||''}`));
+      html+=`<div class="chaincell ev-${r.status}" title="${(r.reason||'').replace(/"/g,'&quot;')}">
+        <b>${{ACCEPTED:'✔',WAITING:'⏸',REJECTED:'✖',DUP_CONFLICT:'✖'}[r.status]||'•'} ${names[typ]}</b>
+        #${r.seq} ${r.status}<br><span style="color:#8fa3b8">${extra||''}</span>
+        ${r.reason?`<br><span style="color:#e5534b;font-size:10px">${r.reason}</span>`:''}</div>`;
+    }
+    html+='</div></div>';
+  }
+  html+='</details>';
+  box.innerHTML=html;
+}
+let selectedPkgId=null;
+fillPkgTickets().then(loadPkgs);
+setInterval(async()=>{
+  await fillPkgTickets();
+  await loadPkgs();
+  if(selectedPkgId && document.querySelector('#pkg-detail details')) showPkgDetail(selectedPkgId,null);
+}, 4000);
+</script>
+</body>
+</html>

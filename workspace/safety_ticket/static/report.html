@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>事故分析报告 · 配电检修安全票</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; background:#0f1620; color:#dbe4ee; }
+  header { padding:10px 18px; background:#16202e; border-bottom:1px solid #263449; display:flex; gap:16px; align-items:center;}
+  header h1 { font-size:17px; margin:0; color:#7fd0ff; }
+  header a { color:#9fb3c8; font-size:13px; }
+  main { display:grid; grid-template-columns: 400px 1fr; gap:10px; padding:10px; }
+  .card { background:#16202e; border:1px solid #263449; border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:#7fd0ff; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:13px; margin:2px;}
+  button:hover { background:#388bfd; }
+  button.ghost { background:#2a3a4f; }
+  input,select { background:#0b1119; color:#dbe4ee; border:1px solid #33465e; border-radius:5px; padding:4px 8px; font-size:13px; margin:2px; max-width:100%;}
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { padding:4px 6px; border-bottom:1px solid #22303f; text-align:left; vertical-align:top;}
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11.5px; margin:1px; background:#22303f;}
+  .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12.5px; margin:2px 4px 2px 0; background:#22303f;}
+  .badge b { color:#7fd0ff; }
+  .halt { background:#3d1d1f; border:1px solid #b8323e; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:12.5px;}
+  .okbox { background:#143a24; border:1px solid #1a7f4b; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:12.5px;}
+  .diff-off { color:#ff8a80; } .diff-hyp { color:#6fd3a7; }
+  .muted { color:#8fa3b8; font-size:12px; }
+  .ok { color:#2ea043; } .err { color:#e5534b; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  #log { max-height:200px; overflow-y:auto; font-size:12.5px; font-family:ui-monospace,monospace; background:#0b1119; border-radius:6px; padding:8px;}
+  #log div { padding:2px 4px; border-bottom:1px solid #1c2836; white-space:pre-wrap;}
+  .branchbox { border:1px solid #2a3a4f; border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📋 事故分析报告</h1>
+  <a href="/" target="_blank">→ 调度端</a>
+  <a href="/replay" target="_blank">→ 审计事件回放页</a>
+  <a href="/shift" target="_blank">→ 换班接续台</a>
+  <a href="/voucher" target="_blank">→ 外发凭证柜</a>
+  <span style="margin-left:auto;font-size:12px;color:#9fb3c8">报告保留固定来源摘要、事件范围与分支差异 · 重复生成返回同一结果</span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h3>① 选择回放与分支</h3>
+      <div class="row">工作票：<select id="tid" style="min-width:240px"></select></div>
+      <div class="row">回放：<select id="rid" style="min-width:240px"></select></div>
+      <div id="branch-picks" class="muted">选择回放后列出其假设分支。</div>
+      <div class="row" style="margin-top:6px">
+        标题 <input id="title" value="事故分析报告" style="width:150px">
+        幂等键 <input id="idem-key" placeholder="（可选）" style="width:110px">
+        <button onclick="generate()">📝 生成报告</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>② 已生成报告</h3>
+      <div id="report-list" class="muted">暂无报告。</div>
+    </div>
+    <div class="card">
+      <h3>操作日志</h3>
+      <div id="log"></div>
+    </div>
+  </section>
+  <section>
+    <div class="card">
+      <h3>报告详情</h3>
+      <div id="report-view"><div class="muted">生成或选择报告后在此展示。</div></div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let replays = [], branches = [], report = null;
+
+async function api(path, method='GET', body){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+function say(msg, cls){
+  const d = document.createElement('div');
+  d.textContent = `[${new Date().toLocaleTimeString('zh-CN',{hour12:false})}] ${msg}`;
+  if(cls) d.style.color = cls;
+  $('log').prepend(d);
+}
+async function refreshTickets(){
+  const ts = await api('/api/tickets');
+  const sel = $('tid'); const cur = sel.value;
+  sel.innerHTML = '';
+  for(const t of ts){
+    const o = document.createElement('option');
+    o.value = t.id; o.textContent = `${t.id} ${t.title} [${t.status}]`;
+    sel.appendChild(o);
+  }
+  if(cur && [...sel.options].some(o=>o.value===cur)) sel.value = cur;
+}
+async function refreshReplays(){
+  const tid = $('tid').value;
+  if(!tid) return;
+  replays = await api(`/api/tickets/${tid}/replays`);
+  const sel = $('rid'); const cur = sel.value;
+  sel.innerHTML = '';
+  for(const r of replays){
+    const o = document.createElement('option');
+    o.value = r.id;
+    o.textContent = `${r.id} [#${r.from_seq}~#${r.to_seq}] ${r.status}${r.halt?' 停于#'+r.halt.position:''}`;
+    sel.appendChild(o);
+  }
+  if(cur && [...sel.options].some(o=>o.value===cur)) sel.value = cur;
+  await refreshBranches();
+  await refreshReports();
+}
+async function refreshBranches(){
+  if(!$('rid').value){ $('branch-picks').innerHTML = '<span class="muted">该票据暂无回放。</span>'; return; }
+  branches = await api(`/api/replays/${$('rid').value}/branches`);
+  $('branch-picks').innerHTML = branches.length
+    ? branches.map(b=>`<label class="tag"><input type="checkbox" class="bpick" value="${b.id}" checked> ${b.name} @#${b.base_seq} v${b.version}（${b.ops.length} 项试算）</label>`).join('')
+    : '<span class="muted">该回放暂无假设分支（可先到回放页创建）。</span>';
+}
+async function refreshReports(){
+  const tid = $('tid').value;
+  if(!tid) return;
+  const rs = await api(`/api/tickets/${tid}/reports`);
+  $('report-list').innerHTML = rs.length
+    ? rs.map(r=>`<div class="row" style="border-bottom:1px solid #22303f;padding:4px 0">
+        <a href="javascript:void(0)" onclick="loadReport('${r.id}')" style="color:#7fd0ff">${r.id}</a>
+        <span>${r.title}</span><span class="muted">摘要 ${r.report_hash}</span></div>`).join('')
+    : '<span class="muted">暂无报告。</span>';
+}
+async function generate(){
+  if(!$('rid').value) return say('请先选择回放', '#d4a72c');
+  const ids = [...document.querySelectorAll('.bpick:checked')].map(x=>x.value);
+  const body = {title:$('title').value, branch_ids:ids, created_by:'分析员'};
+  if($('idem-key').value) body.key = $('idem-key').value;
+  const r = await api(`/api/replays/${$('rid').value}/reports`, 'POST', body);
+  report = r;
+  say(`报告 ${r.id} ${r.duplicate?'已存在（幂等命中，返回首次结果）':'已生成'}：摘要 ${r.report_hash}`, '#2ea043');
+  renderReport();
+  await refreshReports();
+}
+async function loadReport(id){
+  report = await api(`/api/reports/${id}`);
+  renderReport();
+}
+async function regenerate(){
+  if(!report) return;
+  const r = await api(`/api/reports/${report.id}/regenerate`, 'POST');
+  const same = JSON.stringify(r.report.content) === JSON.stringify(report.content);
+  say(`重复生成：identical=${r.identical}，完整性=${r.integrity_ok}，内容与首次${same?'完全一致':'不一致！'}`,
+      same && r.integrity_ok ? '#2ea043' : '#e5534b');
+}
+function renderReport(){
+  if(!report) return;
+  const ct = report.content;
+  const halt = ct.halt
+    ? `<div class="halt">⛔ 回放停止（${ct.halt.code}）：${ct.halt.detail}（最后有效事件 #${ct.halt.at_seq}，位置 #${ct.halt.position}）</div>`
+    : `<div class="okbox">✅ 回放完整有效（${ct.replay_status}）</div>`;
+  const branches = ct.branches.map(b=>`
+    <div class="branchbox">
+      <b>${b.name}</b> <span class="muted">${b.id} · 基点 #${b.base_seq} · v${b.version}</b>
+      <div style="margin:4px 0">${b.ops.map(o=>`<span class="tag">${o.ord}. ${o.op_type} ${JSON.stringify(o.params)}</span>`).join('')||'<span class="muted">无试算</span>'}</div>
+      <div class="${b.safety.work_area_energized.length?'halt':'okbox'}">⚠ ${b.safety.note}</div>
+      ${b.diff.length ? `<table><tr><th>方面</th><th>对象</th><th>正式回放</th><th>假设分支</th></tr>
+        ${b.diff.map(d=>`<tr><td>${d.aspect}</td><td>${d.target}</td>
+          <td class="diff-off">${JSON.stringify(d.official)}</td>
+          <td class="diff-hyp">${JSON.stringify(d.hypothetical)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">与正式回放无差异。</div>'}
+    </div>`).join('') || '<div class="muted">未并入分支。</div>';
+  $('report-view').innerHTML = `
+    <div class="row">
+      <span class="badge">报告 <b>${report.id}</b></span>
+      <span class="badge">报告摘要 <b>${report.report_hash}</b></span>
+      <button class="ghost" onclick="regenerate()">♻ 重复生成（应返回同一结果）</button>
+    </div>
+    <h4 style="margin:8px 0 4px">${ct.title}</h4>
+    <div>
+      <span class="badge">票据 <b>${ct.ticket}</b></span>
+      <span class="badge">回放 <b>${ct.replay}</b></span>
+      <span class="badge">固定来源摘要 <b>${ct.source_digest}</b></span>
+      <span class="badge">事件范围 <b>#${ct.event_range.from_seq} ~ #${ct.event_range.to_seq}</b></span>
+      <span class="badge">生成人 <b>${ct.generated_by}</b></span>
+    </div>
+    ${halt}
+    <h4 style="margin:8px 0 4px">分支差异（${ct.branches.length}）</h4>
+    ${branches}`;
+}
+$('tid').onchange = refreshReplays;
+$('rid').onchange = refreshBranches;
+(async () => { await refreshTickets(); await refreshReplays(); })();
+</script>
+</body>
+</html>

@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>计量检定与批次召回 · 配电检修安全票协同系统</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; background:#0f1620; color:#dbe4ee; }
+  header { padding:10px 18px; background:#16202e; border-bottom:1px solid #263449; display:flex; gap:16px; align-items:center; flex-wrap:wrap;}
+  header h1 { font-size:17px; margin:0; color:#7fd0ff; }
+  header a { color:#9fb3c8; font-size:13px; }
+  main { padding:10px; }
+  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+  .card { background:#16202e; border:1px solid #263449; border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:#7fd0ff; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:13px; margin:2px;}
+  button:hover { background:#388bfd; }
+  button.ghost { background:#2a3a4f; }
+  button.danger { background:#b8323e; }
+  button.good { background:#1a7f4b; }
+  input,select,textarea { background:#0b1119; color:#dbe4ee; border:1px solid #33465e; border-radius:5px; padding:4px 8px; font-size:13px; margin:2px;}
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { padding:4px 6px; border-bottom:1px solid #22303f; text-align:left; vertical-align:top;}
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11.5px; margin:1px;}
+  .st-ACTIVE { background:#1a7f4b; } .st-SUSPENDED { background:#b8323e; }
+  .st-SUPERSEDED { background:#4a4458; } .st-FREE { background:#2a3a4f; }
+  .st-LOCKED { background:#1f6feb; } .st-ISSUED { background:#7a4fb0; }
+  .st-QUARANTINED,.st-BLOCKED,.st-MAINTENANCE { background:#b8323e; }
+  .dp-QUARANTINED { background:#b8323e; } .dp-LOCK_REVOKED { background:#d4631a; }
+  .dp-FIELD_FROZEN { background:#8a6d1a; } .dp-ARCHIVE_MARK,.dp-OUT_OF_SERVICE { background:#4a4458; }
+  .ok { color:#2ea043; } .bad { color:#e5534b; } .warn { color:#d4a72c; }
+  #log { max-height:240px; overflow-y:auto; font-family:ui-monospace,monospace; font-size:12px;
+         background:#0b1119; border-radius:6px; padding:8px; white-space:pre-wrap;}
+  #log .t { color:#6b7a8d; }
+  .small { font-size:11.5px; color:#8fa3b8; }
+  details summary { cursor:pointer; color:#7fd0ff; margin:3px 0; }
+  .mono { font-family:ui-monospace,monospace; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔬 计量工器具检定与批次召回</h1>
+  <a href="/">→ 调度端</a>
+  <a href="/tools" target="_blank">→ 工器具借还台</a>
+  <a href="/docs" target="_blank">→ 接口文档</a>
+  <span class="small" style="margin-left:auto">证书一经用于现场任务即固化 · 召回按当时状态处置 · 复检解除部分恢复</span>
+</header>
+<main>
+  <div class="card">
+    <h3>一键演示（每幕自动复位上一幕，剧本可反复执行）</h3>
+    <div class="toolbar">
+      <button onclick="demo(1)">① 证书换版（旧版固化不可覆盖）</button>
+      <button onclick="demo(2)">② 临近到期/电压不符拒绝</button>
+      <button onclick="demo(3)">③ 批次召回（四种处置）</button>
+      <button onclick="demo(4)">④ 召回与许可冲突</button>
+      <button onclick="demo(5)">⑤ 相同召回重复提交</button>
+      <button onclick="demo(6)">⑥ 现场使用中冻结</button>
+      <button onclick="demo(7)">⑦ 复检部分恢复</button>
+      <button onclick="demo(8)">⑧ 重启后继续处理</button>
+      <button class="ghost" onclick="resetAll()">复位演示数据</button>
+      <button class="ghost" onclick="loadAll()">刷新</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h3>检定员 · 证书版本登记</h3>
+        <div class="toolbar">
+          器具 <select id="cert-serial" style="min-width:180px"></select>
+          有效期 <input id="cert-days" type="number" value="365" style="width:80px"> 天
+          适用电压 <input id="cert-vmin" type="number" step="0.1" value="0.4" style="width:70px"> ~
+          <input id="cert-vmax" type="number" step="0.1" value="35" style="width:70px"> kV
+          <label class="small"><input type="checkbox" id="cert-amend"> 仅更正未使用证书</label>
+          <button onclick="registerCert()">登记/换版</button>
+        </div>
+        <div class="toolbar" style="margin-top:6px">
+          <button class="ghost" onclick="suspendCert(true)">暂停当前版本</button>
+          <button class="good" onclick="suspendCert(false)">恢复暂停版本</button>
+          <button class="ghost" onclick="showHistory()">查看证书沿革</button>
+        </div>
+        <div id="cert-msg" class="small"></div>
+        <details><summary>证书沿革 / 适用范围 / 使用记录</summary><div id="cert-history"></div></details>
+      </div>
+
+      <div class="card">
+        <h3>调度侧 · 安全票准备清单资格</h3>
+        <div class="toolbar">
+          安全票 <select id="ticket-sel" style="min-width:260px"></select>
+          <button class="ghost" onclick="loadTickets()">刷新票据</button>
+          <button onclick="checkEligibility()">按计划时段+电压校验资格</button>
+        </div>
+        <div id="elig" class="small"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h3>质量负责人 · 发起召回</h3>
+        <div class="toolbar">
+          范围类型 <select id="rc-type">
+            <option value="SERIAL">按器具编号</option>
+            <option value="BATCH">按生产批号</option>
+            <option value="CERT">按证书版本</option>
+          </select>
+          <input id="rc-value" placeholder="多个值用逗号分隔，如 VDT-B2311-01 或 B2311" style="min-width:260px">
+        </div>
+        <div class="toolbar" style="margin-top:6px">
+          原因 <input id="rc-reason" value="周期性缺陷召回" style="width:220px">
+          幂等键 <input id="rc-key" placeholder="可选" style="width:120px">
+          <button class="danger" onclick="createRecall()">发起召回</button>
+        </div>
+        <div id="rc-msg" class="small"></div>
+      </div>
+
+      <div class="card">
+        <h3>复检结论与召回解除</h3>
+        <div class="toolbar">
+          召回 <select id="rc-sel" style="min-width:200px"></select>
+          器具 <select id="chk-serial" style="min-width:180px"></select>
+          结论
+          <select id="chk-result"><option value="PASS">PASS 通过复检</option><option value="FAIL">FAIL 未通过</option></select>
+          <button onclick="createRecheck()">登记复检</button>
+          <button class="good" onclick="releaseRecall()">引用复检解除召回</button>
+        </div>
+        <div class="small">仅恢复“通过复检且未被其他有效召回覆盖”的器具；同一复检单重复解除返回首次结果。</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>计量器具与证书版本（🔒=已用于现场任务不可覆盖）</h3>
+    <div style="max-height:300px;overflow:auto">
+    <table id="tools-tbl"><thead><tr>
+      <th>器具编号</th><th>型号/批号</th><th>器具状态</th><th>证书版本</th><th>生效区间</th>
+      <th>适用电压</th><th>证书状态</th><th>冻结原因</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>召回裁决：受影响清单 · 受影响任务 · 器具处置 · 每次裁决依据</h3>
+    <div id="recalls"></div>
+  </div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+function fmt(ms){ return ms?new Date(ms).toLocaleString('zh-CN',{hour12:false}):'-'; }
+function esc(s){ return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+async function api(path, method='GET', body){
+  const r = await fetch(path,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+function log(msg, cls){
+  const d=document.createElement('div');
+  d.innerHTML = `<span class="t">[${new Date().toLocaleTimeString('zh-CN',{hour12:false})}]</span> `+
+    `<span class="${cls||''}">${esc(typeof msg==='string'?msg:JSON.stringify(msg))}</span>`;
+  $('log').prepend(d);
+}
+function errText(e){
+  if(e.detail && typeof e.detail==='object') return `${e.detail.reason_code}: ${e.detail.detail}`;
+  return esc(e.detail||e);
+}
+
+let board=null, tickets=[];
+async function loadAll(){
+  await Promise.all([loadBoard(), loadTickets(), loadRecalls()]);
+}
+async function loadBoard(){
+  board = await api('/api/metro/board');
+  fillSerialSelects(); renderTools();
+}
+function fillSerialSelects(){
+  const metro = board.tools.filter(t=>t.metro);
+  for(const sel of [$('cert-serial'),$('chk-serial')]){
+    const cur=sel.value;
+    sel.innerHTML = metro.map(t=>`<option value="${t.serial}">${t.serial} ${t.state}${t.metro_frozen?'·冻结':''}</option>`).join('');
+    if(cur) sel.value=cur;
+  }
+}
+function renderTools(){
+  const tb=$('tools-tbl').querySelector('tbody'); tb.innerHTML='';
+  for(const t of board.tools){
+    const c=t.latest_cert;
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><b>${t.serial}</b>${t.metro?'':' <span class="small">（非计量器具）</span>'}</td>
+      <td>${t.code} / ${t.batch_id}</td>
+      <td><span class="tag st-${t.state}">${t.state}</span>${t.metro_frozen?'<span class="tag st-QUARANTINED">冻结</span>':''}</td>
+      <td>${c?('v'+c.ver+(c.used?' 🔒':'')):'—'}</td>
+      <td class="small">${c?fmt(c.valid_from)+'<br>→ '+fmt(c.valid_to):'—'}</td>
+      <td class="small">${c?(c.voltage_min+'~'+c.voltage_max+'kV'):'—'}</td>
+      <td>${c?`<span class="tag st-${c.status}">${c.status}</span>`:'—'}</td>
+      <td class="small ${t.freeze_reason?'bad':''}">${esc(t.freeze_reason||'')}</td>`;
+    tr.style.cursor='pointer'; tr.onclick=()=>{ $('cert-serial').value=t.serial; showHistory(); };
+    tb.appendChild(tr);
+  }
+}
+async function loadTickets(){
+  tickets = await api('/api/tickets');
+  const sel=$('ticket-sel'); const cur=sel.value;
+  sel.innerHTML=tickets.map(t=>`<option value="${t.id}">${t.id} ${t.title} [${t.status}]</option>`).join('');
+  if(cur) sel.value=cur;
+}
+async function loadRecalls(){
+  const rs = await api('/api/metro/recalls');
+  const sel=$('rc-sel'); const cur=sel.value;
+  sel.innerHTML=rs.map(r=>`<option value="${r.id}">${r.id} ${r.scope_type} ${r.scope.join(',')} [${r.status}]</option>`).join('');
+  if(cur) sel.value=cur;
+  // chk serial follow selected recall
+  const rc = rs.find(r=>r.id===$('rc-sel').value);
+  if(rc){
+    const cs=$('chk-serial'); const cc=cs.value;
+    cs.innerHTML=rc.affected.map(i=>`<option value="${i.serial}">${i.serial} ${i.disposition}${i.restored?'·已恢复':''}</option>`).join('');
+    if(cc) cs.value=cc;
+  }
+  const box=$('recalls'); box.innerHTML='';
+  for(const r of rs.slice().reverse()){
+    const items=r.affected.map(i=>`<tr>
+      <td>${i.serial}</td><td>${i.code}</td><td class="small">${i.state_before}</td>
+      <td><span class="tag dp-${i.disposition}">${i.disposition}</span>${i.restored?' <span class="tag st-ACTIVE">已恢复</span>':''}</td>
+      <td class="small">${esc(i.detail)}</td></tr>`).join('');
+    const marks=r.marks.map(m=>`<div class="small">· [${m.kind}] ${m.serial} → ${m.ref_type||''} ${esc(m.ref_id||'')}<br>&nbsp;&nbsp;${esc(m.detail)}</div>`).join('');
+    box.innerHTML += `<details style="border-top:1px solid #22303f;padding:6px 0" ${rs.indexOf(r)===0?'open':''}>
+      <summary><b>${r.id}</b> <span class="tag ${r.status==='ACTIVE'?'st-QUARANTINED':'st-ACTIVE'}">${r.status}</span>
+        ${r.scope_type}: ${r.scope.join('、')} ｜受影响 ${r.affected_count} 件｜受影响任务 ${(r.tasks||[]).join('、')||'—'}
+        <span class="small">${esc(r.reason)} by ${r.actor}</span></summary>
+      <table style="margin:6px 0"><thead><tr><th>器具</th><th>型号</th><th>召回前状态</th><th>处置</th><th>裁决依据</th></tr></thead><tbody>${items}</tbody></table>
+      <div class="small">待恢复：${(r.pending_restore||[]).join('、')||'无'}</div>
+      <div style="margin-top:4px">每次裁决依据/标记：${marks||'<span class="small">无</span>'}</div>
+    </details>`;
+  }
+}
+
+// ---------------- 证书操作
+async function registerCert(){
+  const sn=$('cert-serial').value;
+  try{
+    const j=await api('/api/metro/certificates','POST',{serial:sn,
+      valid_days:+$('cert-days').value, voltage_min:+$('cert-vmin').value, voltage_max:+$('cert-vmax').value,
+      force_amend:$('cert-amend').checked});
+    log(j.amended?`已更正 ${sn} 未使用证书 v${j.cert.ver}（已使用证书拒绝覆盖）`
+              :`${sn} 已形成后继证书版本 v${j.cert.ver}（旧版本置 SUPERSEDED 原样保留）`, j.amended?'warn':'ok');
+  }catch(e){ log('证书登记被拒：'+errText(e),'bad'); }
+  await loadAll(); showHistory();
+}
+async function suspendCert(suspend){
+  const sn=$('cert-serial').value;
+  const c=board.tools.find(t=>t.serial===sn).latest_cert;
+  const path=suspend?'/api/metro/certificates/suspend':'/api/metro/certificates/resume';
+  try{
+    const j=await api(path,'POST',{cert_id:c.cert_id, serial:sn, reason:suspend?'页面暂停':'页面恢复'});
+    log(`${sn} 证书 ${j.cert.cert_id} → ${j.cert.status}`+
+        (j.duplicate?'（重复操作，返回首次结果）':''), suspend?'bad':'ok');
+  }catch(e){ log('证书暂停/恢复失败：'+errText(e),'bad'); }
+  await loadAll();
+}
+async function showHistory(){
+  const sn=$('cert-serial').value;
+  const h=await api('/api/metro/tools/'+sn);
+  let html='<table style="margin-top:6px"><thead><tr><th>版本</th><th>证书号</th><th>状态</th><th>生效区间</th><th>电压</th><th>已用于现场</th><th>登记依据</th></tr></thead><tbody>';
+  for(const v of h.versions){
+    html+=`<tr><td>v${v.ver}</td><td class="mono">${v.cert_id}</td>
+      <td><span class="tag st-${v.status}">${v.status}</span></td>
+      <td class="small">${fmt(v.valid_from)}<br>→ ${fmt(v.valid_to)}</td>
+      <td class="small">${v.voltage_min}~${v.voltage_max}kV</td>
+      <td>${v.used?('🔒 '+fmt(v.used_at)):'否'}</td>
+      <td class="small">${esc(v.note)} by ${esc(v.registered_by)}</td></tr>`;
+  }
+  html+='</tbody></table>';
+  if(h.used_on.length) html+='<div class="small" style="margin-top:6px">使用记录：'+
+    h.used_on.map(u=>`${u.box?('箱'+u.box):''}/票${u.ticket} 用 ${u.cert_id}@v${u.cert_ver}`).join('；')+'</div>';
+  if(h.marks.length) html+='<div class="small bad" style="margin-top:6px">召回标记：'+
+    h.marks.map(m=>`[${m.kind}] ${esc(m.detail)}`).join('<br>')+'</div>';
+  $('cert-history').innerHTML=html;
+}
+
+// ---------------- 资格校验
+async function checkEligibility(){
+  const tid=$('ticket-sel').value;
+  const j=await api(`/api/tickets/${tid}/tool-eligibility`);
+  let html=`<div>计划时段 ${fmt(j.job.plan_start_ms)} → ${fmt(j.job.plan_end_ms)}｜电压 ${j.job.voltage_kv}kV</div>`;
+  if(j.rejected.length){
+    html+='<table><thead><tr><th>型号</th><th>器具</th><th>拒绝原因码</th><th>可核对原因</th></tr></thead><tbody>'+
+      j.rejected.map(r=>`<tr><td>${r.code}</td><td>${r.serial}</td><td class="bad">${r.reason_code}</td><td class="small">${esc(r.detail)}</td></tr>`).join('')+
+      '</tbody></table>';
+  } else {
+    html+=`<div class="ok">在库 ${j.accepted.length} 件全部合格，可纳入准备清单</div>`;
+  }
+  $('elig').innerHTML=html;
+  log(`资格校验：${j.rejected.length?j.rejected.length+' 件被拒（已返回可核对原因）':'全部合格'}`,
+      j.rejected.length?'warn':'ok');
+}
+
+// ---------------- 召回
+function rcValues(){ return $('rc-value').value.split(',').map(s=>s.trim()).filter(Boolean); }
+async function createRecall(){
+  try{
+    const j=await api('/api/metro/recalls','POST',{scope_type:$('rc-type').value,
+      scope_value:rcValues(), reason:$('rc-reason').value, key:$('rc-key').value||null});
+    if(j.duplicate){
+      log(`相同召回再次提交 → 返回原结果 ${j.id}（不重复冻结/不追加重复审计）：${j.duplicate_reason}`,'warn');
+    }else{
+      const cnts=Object.entries(j.disposition_counts).map(([k,v])=>`${k}×${v}`).join('，');
+      log(`召回 ${j.id} 已裁决：${j.affected_count} 件（${cnts}），受影响任务 ${(j.tasks||[]).join('、')||'—'}`,'bad');
+    }
+  }catch(e){ log('召回失败：'+errText(e),'bad'); }
+  await loadAll();
+}
+async function createRecheck(){
+  const rid=$('rc-sel').value, sn=$('chk-serial').value;
+  try{
+    const j=await api(`/api/metro/recalls/${rid}/rechecks`,'POST',{results:[
+      {serial:sn,result:$('chk-result').value}]});
+    const r=j.results[0];
+    log(`复检单 ${j.recheck_id}：${sn} ${r.result}`+(r.duplicate?'（重复登记，返回首次结论）':''),'ok');
+  }catch(e){ log('复检登记失败：'+errText(e),'bad'); }
+  await loadAll();
+}
+async function releaseRecall(){
+  const rid=$('rc-sel').value;
+  const rechecks=board? [] : [];
+  const rc=(await api('/api/metro/recalls')).find(r=>r.id===rid);
+  const chk=(await api('/api/metro/rechecks')).filter(x=>x.recall===rid && x.result==='PASS');
+  if(!chk.length){ log('该召回尚无 PASS 复检结论，不能解除','bad'); return; }
+  try{
+    const j=await api(`/api/metro/recalls/${rid}/release`,'POST',{recheck_id:chk[0].id});
+    if(j.duplicate){ log(`重复解除 → 返回首次结果（${j.restored.length} 件恢复）`,'warn'); return; }
+    log(`召回 ${rid} 解除：恢复 ${j.restored.map(x=>x.serial).join('、')||'无'}`+
+        (j.kept.length?`；未恢复 ${j.kept.map(k=>k.serial+'('+k.reason+')').join('、')}`:'')+
+        (j.status==='RELEASED'?'；召回已结案':'（部分恢复，召回仍 ACTIVE）'),
+        j.kept.length?'warn':'ok');
+  }catch(e){ log('召回解除失败：'+errText(e),'bad'); }
+  await loadAll();
+}
+
+// ---------------- 演示剧本
+let demoTicket=null;
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function newDemoTicket(planHours=8, voltage=10){
+  const now=Date.now();
+  const t=await api('/api/tickets','POST',{title:'检定演示·样板',work_area:['F2'],
+    created_by:'调度员', voltage_kv:voltage, plan_start_ms:now, plan_end_ms:now+planHours*3600_000});
+  demoTicket=t.id; return t;
+}
+async function lockKit(tid, serials){
+  return api(`/api/tickets/${tid}/tool-locks`,'POST',
+    {serials:serials||undefined, partial:!!(serials&&Object.keys(serials).length)});
+}
+async function fullKit(tid, box){
+  const l=await lockKit(tid);
+  await api(`/api/tickets/${tid}/tool-boxes`,'POST',{box_id:box, deadline_hours:8});
+  const b=await api('/api/tool-boxes/'+box);
+  for(const line of b.lines){
+    await api(`/api/tool-boxes/${box}/scan`,'POST',{client_id:'PDA-DEMO', serial:line.serial});
+  }
+  return b;
+}
+async function resetAll(){
+  const j=await api('/api/demo/metro/reset','POST',{});
+  demoTicket=null;
+  await loadAll();
+  log(j.note,'ok');
+}
+
+async function demo(n){
+  log(`—— 第 ${n} 幕开始 ——`);
+  await resetAll();
+  try{
+    if(n===1) await demoVersion();
+    else if(n===2) await demoExpiry();
+    else if(n===3) await demoBatchRecall();
+    else if(n===4) await demoConflict();
+    else if(n===5) await demoDuplicate();
+    else if(n===6) await demoFieldFreeze();
+    else if(n===7) await demoPartialRelease();
+    else if(n===8) await demoRestart();
+  }catch(e){ log('演示中断：'+errText(e),'bad'); }
+  await loadAll();
+}
+
+async function demoVersion(){
+  const t=await newDemoTicket();
+  const l=await lockKit(t.id);
+  const sn=l.lines.find(x=>x.code==='VDT').serial;
+  log(`锁定成功：${sn} 以证书 v1 纳入准备清单 → 证书标记“已用于现场任务（🔒）”`,'ok');
+  // 覆盖修改被拒
+  try{ await api('/api/metro/certificates','POST',{serial:sn,valid_days:9,force_amend:true}); }
+  catch(e){ log('试图覆盖已用证书 → '+errText(e),'bad'); }
+  // 合法路径：后继版本
+  const v2=await api('/api/metro/certificates','POST',{serial:sn,valid_days:180,voltage_min:0.4,voltage_max:35});
+  log(`合法换版 → v${v2.cert.ver}：旧 v1 置 SUPERSEDED 原样保留，新票只能用新版本`,'ok');
+  $('cert-serial').value=sn; showHistory();
+}
+
+async function demoExpiry(){
+  const now=Date.now();
+  const sn='VDT-B2311-01';
+  await api('/api/metro/certificates','POST',{serial:sn,valid_from:now-86400000,
+    valid_to:now+86400000,voltage_min:0.4,voltage_max:35});
+  log(`${sn} 证书换为明日到期（v2）；计划作业 48 小时`,'warn');
+  const t=await newDemoTicket(48,10);
+  try{
+    await lockKit(t.id,{VDT:[sn]});
+  }catch(e){ log('锁定被拒（整批原子回滚）→ '+errText(e),'bad'); }
+  // 电压不符
+  const t2=await newDemoTicket(8,110);
+  try{ await lockKit(t2.id,{VDT:[sn]}); }
+  catch(e){ log('110kV 作业锁定被拒 → '+errText(e),'bad'); }
+  $('ticket-sel').value=t.id; checkEligibility();
+}
+
+async function demoBatchRecall(){
+  // 同一事务演示四种处置：库内隔离 / 已预留撤资格 / 现场使用中冻结 / 归档历史只加标记
+  // 为避免跨工作区齐套占用全部库存，演示只对计量器具（验电器）逐件锁定/建小箱
+  async function vdtBox(tid,bid){
+    await lockKit(tid,{VDT:[sn]});
+    await api(`/api/tickets/${tid}/tool-boxes`,'POST',{box_id:bid,deadline_hours:8});
+    const r=await api(`/api/tool-boxes/${bid}/scan`,'POST',{client_id:'PDA-DEMO',serial:sn});
+    if(!r.ok) throw new Error(r.reason||'scan fail');
+    return r;
+  }
+  // ① 票一（F2）：一件验电器领用移交 → 现场正在使用（真实持有记录保留）
+  const t1=await newDemoTicket();
+  let sn='VDT-B2311-01';
+  await vdtBox(t1.id,'BXR1');
+  await api('/api/tool-boxes/BXR1/handover','POST',{leader:'王负责',team:'甲班'});
+  log(`① 票一 ${t1.id}：${sn} 现场正在使用（checkouts 领用记录保留）`);
+  // ② 票二（F3）：另一件验电器领用、移交、归还 → 已归档历史
+  const t2=await api('/api/tickets','POST',{title:'检定演示·样板',work_area:['F3'],
+    created_by:'调度员',voltage_kv:10,plan_start_ms:Date.now(),plan_end_ms:Date.now()+8*3600000});
+  sn='VDT-B2311-02';
+  await vdtBox(t2.id,'BXR2');
+  await api('/api/tool-boxes/BXR2/handover','POST',{leader:'赵负责',team:'乙班'});
+  await api('/api/tool-boxes/BXR2/return','POST',
+    {box_seal:'S-OK',items:[{serial:sn,code:'VDT',wear:'OK',seal_ok:true}]});
+  const archived=sn;
+  log(`② 票二 ${t2.id}：${archived} 已归还归档（当时证书 v1 固化在领用记录，不改写）`);
+  // ③ 撤回前两票（无物理残留，立即释放控制权；工具持有/归档状态不变），票三（F1）只锁第三件不出库
+  await api(`/api/tickets/${t1.id}/withdraw`,'POST',{actor:'调度员',reason:'演示：释放边界'});
+  await api(`/api/tickets/${t2.id}/withdraw`,'POST',{actor:'调度员',reason:'演示：释放边界'});
+  const t3=await api('/api/tickets','POST',{title:'检定演示·样板',work_area:['F1'],
+    created_by:'调度员',voltage_kv:10,plan_start_ms:Date.now(),plan_end_ms:Date.now()+8*3600000});
+  sn='VDT-B2311-03';
+  await lockKit(t3.id,{VDT:[sn]});
+  log(`③ 票三 ${t3.id}：${sn} 已预留尚未出库（批次锁生效）`);
+  const reserved=sn, field='VDT-B2311-01';
+  // ④ 第四件保持库内 → QUARANTINED；一个事务按编号召回四件
+  const inStock='VDT-B2311-04';
+  const scope=[field, archived, reserved, inStock];
+  const r=await api('/api/metro/recalls','POST',{scope_type:'SERIAL',scope_value:scope,
+    reason:'四处置演示召回'});
+  const name={QUARANTINED:'库内→隔离',LOCK_REVOKED:'预留→撤资格',FIELD_FROZEN:'现场→冻结',
+    OUT_OF_SERVICE:'已停用→登记'};
+  const cnts=Object.entries(r.disposition_counts).map(([k,v])=>`${name[k]||k}×${v}`).join('，');
+  log(`④ 召回 ${r.id} 同一事务裁决：${cnts}；受影响任务 ${r.tasks.join('、')}`,'bad');
+  for(const i of r.affected){
+    log(`${i.serial} → ${name[i.disposition]}：${i.detail}`,
+        i.disposition==='FIELD_FROZEN'?'warn':'bad');
+  }
+  const marks=r.marks.filter(m=>m.kind==='ARCHIVE_MARK');
+  if(marks.length) marks.forEach(m=>
+    log(`${m.serial} 已归档历史 → 第四种处置：只追加召回标记，当时使用的证书不改写`,'ok'));
+}
+
+async function demoConflict(){
+  const t=await newDemoTicket();
+  const l=await lockKit(t.id);
+  const sn=l.lines.find(x=>x.code==='VDT').serial;
+  await api(`/api/tickets/${t.id}/tool-boxes`,'POST',{box_id:'BXCF'});
+  // 先召回（库内预留件）→ 扫码必被拒
+  await api('/api/metro/recalls','POST',{scope_type:'SERIAL',scope_value:[sn],reason:'许可冲突演示'});
+  const scan=await api('/api/tool-boxes/BXCF/scan','POST',{serial:sn});
+  log(`先召回后领用：${sn} 扫码裁决 ok=${scan.ok}（${scan.reason_code||'OK'}：${scan.reason||''}）`+
+      '——持久化版本决定唯一结果，可核对拒绝原因','bad');
+}
+
+async function demoDuplicate(){
+  const sn='WRENCH-B2401-02';
+  const body={scope_type:'SERIAL',scope_value:[sn],reason:'重复召回幂等演示'};
+  const r1=await api('/api/metro/recalls','POST',body);
+  const r2=await api('/api/metro/recalls','POST',body);
+  log(`首次召回 ${r1.id}；再次提交 → duplicate=${r2.duplicate}，返回 ${r2.id} 原结果`,
+      r2.duplicate?'ok':'bad');
+  log('冻结只执行一次、审计只一条 METRO_RECALLED、相同标记不追加第二条','ok');
+}
+
+async function demoFieldFreeze(){
+  const t=await newDemoTicket();
+  const b=await fullKit(t.id,'BXFRZ');
+  const sn=b.lines.find(l=>l.code==='VDT').serial;
+  await api('/api/tool-boxes/BXFRZ/handover','POST',{leader:'王负责',team:'甲班'});
+  const r=await api('/api/metro/recalls','POST',{scope_type:'SERIAL',scope_value:[sn],
+    reason:'现场使用中冻结演示'});
+  const d=r.affected[0];
+  log(`${sn} 召回处置=${d.disposition}：${d.detail}`,'warn');
+  log('checkouts 领用记录与当时证书原样保留；tools.metro_frozen=1，后续许可在现场闸门被拒','ok');
+}
+
+async function demoPartialRelease(){
+  const s1='VDT-B2311-01', s2='VDT-B2311-02';
+  const r=await api('/api/metro/recalls','POST',{scope_type:'SERIAL',scope_value:[s1,s2],
+    reason:'部分恢复演示'});
+  const chk=await api(`/api/metro/recalls/${r.id}/rechecks`,'POST',
+    {results:[{serial:s1,result:'PASS'},{serial:s2,result:'FAIL'}]});
+  const rel=await api(`/api/metro/recalls/${r.id}/release`,'POST',{recheck_id:chk.recheck_id});
+  log(`复检：${s1} PASS / ${s2} FAIL → 仅 ${s1} 恢复 FREE，${s2} 保持隔离；召回 ${rel.status}`+
+      '（未全部恢复，可继续补复检）','warn');
+}
+
+async function demoRestart(){
+  const sn='VDT-B2311-03';
+  await api('/api/metro/certificates','POST',{serial:sn,valid_days:300,voltage_min:0.4,voltage_max:35});
+  const r=await api('/api/metro/recalls','POST',{scope_type:'SERIAL',scope_value:[sn],
+    reason:'重启恢复演示'});
+  log(`${sn} 已换 v2 并召回（未复检）；调用 /api/admin/reopen 模拟主站重启…`,'warn');
+  const ro=await api('/api/admin/reopen','POST',{});
+  log('主站重启：'+ro.note,'ok');
+  const bd=await api('/api/metro/board');
+  const t=bd.tools.find(x=>x.serial===sn);
+  log(`重启后核对：${sn} 状态=${t.state}，证书 v${t.latest_cert.ver} ${t.latest_cert.status}；召回 ${r.id} 仍 ACTIVE`,
+      t.state==='QUARANTINED'?'ok':'bad');
+  const chk=await api(`/api/metro/recalls/${r.id}/rechecks`,'POST',
+    {results:[{serial:sn,result:'PASS',note:'重启后补做复检'}]});
+  const rel=await api(`/api/metro/recalls/${r.id}/release`,'POST',{recheck_id:chk.recheck_id});
+  log(`重启后未完成复检继续处理：召回解除 → ${rel.status}`,'ok');
+}
+
+loadAll();
+$('rc-type').onchange=()=>{ $('rc-value').placeholder={SERIAL:'VDT-B2311-01',BATCH:'B2311',
+  CERT:'C-VDT-B2311-01 或 C-VDT-B2311-01@1'}[$('rc-type').value]; };
+setInterval(loadAll, 5000);
+</script>
+</body>
+</html>

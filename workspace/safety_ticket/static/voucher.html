@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>审计资料外发凭证柜 · 配电检修安全票</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; background:#0f1620; color:#dbe4ee; }
+  header { padding:10px 18px; background:#16202e; border-bottom:1px solid #263449; display:flex; gap:16px; align-items:center;}
+  header h1 { font-size:17px; margin:0; color:#7fd0ff; }
+  header a { color:#9fb3c8; font-size:13px; }
+  main { display:grid; grid-template-columns: 430px 1fr; gap:10px; padding:10px; }
+  .card { background:#16202e; border:1px solid #263449; border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:#7fd0ff; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:13px; margin:2px;}
+  button:hover { background:#388bfd; }
+  button.ghost { background:#2a3a4f; }
+  button.danger { background:#b8323e; }
+  button.warn { background:#8a6d1a; }
+  input,select { background:#0b1119; color:#dbe4ee; border:1px solid #33465e; border-radius:5px; padding:4px 8px; font-size:13px; margin:2px; max-width:100%;}
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { padding:4px 6px; border-bottom:1px solid #22303f; text-align:left; vertical-align:top;}
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11.5px; margin:1px;}
+  .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12.5px; margin:2px 4px 2px 0; background:#22303f;}
+  .badge b { color:#7fd0ff; }
+  .st-SEALED { background:#1f6feb; } .st-CLAIMED { background:#1a7f4b; }
+  .st-EXPIRED { background:#5a3038; } .st-VOID { background:#4a3052; }
+  .halt { background:#3d1d1f; border:1px solid #b8323e; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:12.5px;}
+  .okbox { background:#143a24; border:1px solid #1a7f4b; border-radius:8px; padding:8px 12px; margin:6px 0; font-size:12.5px;}
+  .muted { color:#8fa3b8; font-size:12px; }
+  .ok { color:#2ea043; } .err { color:#e5534b; } .warn-t { color:#d4a72c; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  #log { max-height:260px; overflow-y:auto; font-size:12.5px; font-family:ui-monospace,monospace; background:#0b1119; border-radius:6px; padding:8px;}
+  #log div { padding:2px 4px; border-bottom:1px solid #1c2836; white-space:pre-wrap;}
+  #voucher-list div.vrow { border-bottom:1px solid #22303f; padding:5px 2px; cursor:pointer; }
+  #voucher-list div.vrow:hover { background:#1c2836; }
+  #timeline { max-height:420px; overflow-y:auto; }
+  .ev { border:1px solid #22303f; border-radius:6px; margin-bottom:6px; padding:6px 8px; font-size:12.5px;}
+  .ev .head { display:flex; gap:8px; align-items:center; cursor:pointer;}
+  .ev .seq { color:#7fd0ff; font-family:ui-monospace,monospace; }
+  .ev .states { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px;}
+  .ev pre { background:#0b1119; border-radius:5px; padding:6px; margin:0; font-size:11px; max-height:160px; overflow:auto; white-space:pre-wrap;}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔐 审计资料外发凭证柜</h1>
+  <a href="/" target="_blank">→ 调度端</a>
+  <a href="/replay" target="_blank">→ 审计事件回放</a>
+  <a href="/report" target="_blank">→ 事故分析报告</a>
+  <span style="margin-left:auto;font-size:12px;color:#9fb3c8">封存只读快照 · 幂等不出两份 · 并发首次领取先到者得</span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h3>① 从已完成归约选取连续序号</h3>
+      <div class="row">工作票：<select id="tid" style="min-width:250px"></select>
+        <button class="ghost" onclick="prepareDemo()">⚡ 一键准备演示票</button></div>
+      <div class="row">归约（回放）：<select id="rid" style="min-width:250px"></select></div>
+      <div id="replay-meta" class="muted">选择已完成（OK）的归约后展示其有效序号。</div>
+      <div class="row" style="margin-top:6px">
+        凭证序号：<input id="from-seq" type="number" style="width:80px"> ~
+        <input id="to-seq" type="number" style="width:80px">
+        <button class="ghost" onclick="fillRange()">全段</button>
+      </div>
+      <div class="row">
+        接收人 <input id="receivers" value="监管处,稽查科" style="width:170px">
+        有效期
+        <select id="ttl"><option value="3600000">1 小时</option><option value="14400000">4 小时</option>
+          <option value="1">1 毫秒（演示超时）</option></select>
+      </div>
+      <div class="row">幂等键 <input id="idem-key" placeholder="（可选）" style="width:120px">
+        <button onclick="seal()">🔏 封存凭证</button></div>
+    </div>
+
+    <div class="card">
+      <h3>② 凭证柜（阶段 · 封存摘要 · 序号范围 · 领取人 · 失效原因）</h3>
+      <div class="row">
+        <button class="ghost" onclick="loadVouchers()">刷新</button>
+        <button class="warn" onclick="reopen()">↻ 模拟主站重启</button>
+      </div>
+      <div id="voucher-list" class="muted">暂无凭证。</div>
+    </div>
+
+    <div class="card">
+      <h3>领取与查阅（接收人视角）</h3>
+      <div class="row">
+        接收人 <input id="who" value="监管处" style="width:130px">
+        <button onclick="claim()">🙋 首次领取 / 重复索取</button>
+        <button class="ghost" onclick="viewContent()">📖 查阅只读快照</button>
+        <button class="danger" onclick="voidVoucher()">🚫 主动作废</button>
+      </div>
+      <div id="act-msg" class="muted"></div>
+    </div>
+
+    <div class="card">
+      <h3>七条路径一键演示</h3>
+      <div class="row">
+        <button onclick="run(demoNormal)">1 正常查阅</button>
+        <button onclick="run(demoExpire)">2 超时拒绝</button>
+        <button onclick="run(demoVoid)">3 主动作废</button>
+        <button onclick="run(demoRace)">4 并发领取</button>
+      </div>
+      <div class="row">
+        <button onclick="run(demoIdem)">5 重复请求</button>
+        <button onclick="run(demoAppend)">6 追加记录不改快照</button>
+        <button onclick="run(demoRestart)">7 重启恢复</button>
+      </div>
+      <div id="log" style="margin-top:6px"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h3>凭证详情 / 只读快照</h3>
+      <div id="voucher-view"><div class="muted">封存或选择凭证后在此展示阶段、封存摘要、状态截面与逐条前后记录。</div></div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let replays = [], voucher = null, busy = false;
+
+async function api(path, method='GET', body){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+async function post(path, body){
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  const j = await r.json().catch(()=>({}));
+  return {status:r.status, body:j};
+}
+function say(msg, cls){
+  const d = document.createElement('div');
+  d.textContent = `[${new Date().toLocaleTimeString('zh-CN',{hour12:false})}] ${msg}`;
+  if(cls) d.style.color = cls;
+  $('log').prepend(d);
+}
+async function run(fn){ if(busy){ say('上一个剧本仍在执行…', '#d4a72c'); return; } busy=true;
+  try{ await fn(); }catch(e){ say('剧本异常：'+(e.detail||e.message||e), '#e5534b'); }
+  busy=false; }
+function fmt(ms){ return new Date(ms).toLocaleString('zh-CN',{hour12:false}); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ---------------- 票据 / 归约选择
+async function refreshTickets(keep){
+  const ts = await api('/api/tickets');
+  const sel = $('tid'); const cur = keep ? sel.value : null;
+  sel.innerHTML = '';
+  for(const t of ts){
+    const o = document.createElement('option');
+    o.value = t.id; o.textContent = `${t.id} ${t.title} [${t.status}]`;
+    sel.appendChild(o);
+  }
+  if(cur && [...sel.options].some(o=>o.value===cur)) sel.value = cur;
+  else if(sel.options.length) sel.value = sel.options[sel.options.length-1].value;
+}
+async function refreshReplays(){
+  const tid = $('tid').value; if(!tid) return;
+  replays = await api(`/api/tickets/${tid}/replays`);
+  const sel = $('rid'); const cur = sel.value;
+  sel.innerHTML = '';
+  for(const r of replays){
+    const o = document.createElement('option');
+    o.value = r.id;
+    o.textContent = `${r.id} [#${r.from_seq}~#${r.to_seq}] ${r.status}${r.halt?' 停于#'+r.halt.position:''}`;
+    sel.appendChild(o);
+  }
+  if(cur && [...sel.options].some(o=>o.value===cur)) sel.value = cur;
+  renderReplayMeta();
+}
+function currentReplay(){ return replays.find(r=>r.id===$('rid').value); }
+function renderReplayMeta(){
+  const r = currentReplay();
+  if(!r){ $('replay-meta').textContent = '该票据暂无归约。'; return; }
+  const applied = (r.applied||[]);
+  $('replay-meta').innerHTML = r.status==='OK'
+    ? `<span class="ok">归约完整（OK）</span>，可外发的有效本票据序号：#${applied[0]} ~ #${applied[applied.length-1]}（${applied.length} 条），来源摘要 ${r.source_digest}`
+    : `<span class="err">归约停在 #${r.halt&&r.halt.at_seq}（${r.halt&&r.halt.code}），未完成归约不能封存外发凭证</span>`;
+}
+function fillRange(){
+  const r = currentReplay(); if(!r || !(r.applied||[]).length) return;
+  $('from-seq').value = r.applied[0]; $('to-seq').value = r.applied[r.applied.length-1];
+}
+async function prepareDemo(){
+  const r = await api('/api/demo/replay/prepare','POST',{work_area:['F1']});
+  say(`演示票 ${r.ticket}：事件 #${r.from_seq}~#${r.to_seq}（${r.events} 条）`, '#2ea043');
+  await refreshTickets(true); $('tid').value = r.ticket;
+  await refreshReplays();
+  const rp = await api(`/api/tickets/${r.ticket}/replays`).then(x=>x[0]).catch(()=>null);
+  if(!rp){
+    const made = await api(`/api/tickets/${r.ticket}/replays`,'POST',
+      {from_seq:r.from_seq,to_seq:r.to_seq,created_by:'分析员'});
+    $('rid').value = made.id;
+  } else $('rid').value = rp.id;
+  renderReplayMeta(); fillRange();
+  await loadVouchers();
+}
+
+// ---------------- 封存
+async function seal(opts){
+  const r0 = currentReplay();
+  if(!r0) throw {detail:'请先选择已完成的归约（回放）'};
+  const recv = (opts && opts.receivers || $('receivers').value).split(',').map(s=>s.trim()).filter(Boolean);
+  const body = {from_seq:+(opts&&opts.from_seq||$('from-seq').value),
+    to_seq:+(opts&&opts.to_seq||$('to-seq').value), receivers:recv,
+    deadline:1, ttl_ms:+(opts&&opts.ttl||$('ttl').value), created_by:'分析员'};
+  const key = opts && opts.key; if(key) body.key = key;
+  const res = await post(`/api/replays/${r0.id}/vouchers`, body);
+  if(res.status !== 201){ say('封存失败：'+res.body.detail, '#e5534b'); return null; }
+  const v = res.body;
+  say(`凭证 ${v.id} ${v.duplicate?'已存在（幂等命中，返回首次封存的同一份内容）':'已封存'}：#${v.from_seq}~#${v.to_seq}，封存摘要 ${v.seal_digest}`,
+      v.duplicate?'#d4a72c':'#2ea043');
+  await loadVouchers();
+  return selectVoucher(v.id);
+}
+
+// ---------------- 凭证柜列表
+async function loadVouchers(){
+  const vs = await api('/api/vouchers');
+  const box = $('voucher-list');
+  if(!vs.length){ box.innerHTML = '<span class="muted">暂无凭证。</span>'; return; }
+  box.innerHTML = '';
+  for(const v of vs){
+    const d = document.createElement('div');
+    d.className = 'vrow'; d.dataset.id = v.id;
+    d.innerHTML = `<span class="tag st-${v.status}">${v.status}</span> <b>${v.id}</b>
+      <span class="muted">#${v.from_seq}~#${v.to_seq} · ${v.record_count}条</span><br>
+      <span class="muted">摘要 ${v.seal_digest} ｜接收人 ${esc(v.receivers.join('、'))}
+      ｜领取人 ${v.claimer?'<b class="ok">'+esc(v.claimer)+'</b>':'—'}
+      ｜截止 ${fmt(v.deadline)}</span>
+      ${v.invalid_reason?`<br><span class="err">失效原因：${esc(v.invalid_reason)}</span>`:''}`;
+    d.onclick = ()=>selectVoucher(v.id);
+    box.appendChild(d);
+  }
+  if(voucher) await selectVoucher(voucher.id, true);
+}
+async function selectVoucher(id, silent){
+  const res = await post('/api/vouchers/'+id, {}); // GET via api
+  let v;
+  try{ v = await api('/api/vouchers/'+id); }catch(e){ if(!silent) say(e.detail,'#e5534b'); return null; }
+  voucher = v;
+  document.querySelectorAll('#voucher-list .vrow').forEach(x=>x.style.background=x.dataset.id===id?'#1c2c44':'');
+  renderVoucherMeta(v);
+  return v;
+}
+function projBrief(p){
+  if(!p) return '—';
+  const steps = Object.entries(p.steps||{}).map(([k,v])=>`${k.split(':').pop()}:${v.status}`).join(' ');
+  const ctl = Object.entries(p.control||{}).map(([k,v])=>k+(v?'*':'')).join(' ');
+  return `阶段=${p.status} 冻结=${p.frozen} 持权=${p.write_owner||'—'}\n工序: ${steps||'—'}\n控制权: ${ctl||'—'}\n证据: 班组${p.evidence.shift_accepted}条/链头#${p.evidence.shift_head}`;
+}
+function renderVoucherMeta(v){
+  const box = $('voucher-view');
+  const claims = v.claims.map(c=>`<span class="tag ${c.result==='WON'?'st-CLAIMED':'st-VOID'}">
+      ${c.result==='WON'?'✔中签':'✖未中签'} ${esc(c.receiver)}</span>`).join('') || '<span class="muted">尚无领取记号</span>';
+  box.innerHTML = `
+    <div class="row">
+      <span class="tag st-${v.status}">${v.status}</span>
+      <span class="badge">凭证 <b>${v.id}</b></span>
+      <span class="badge">票据 <b>${v.ticket}</b></span>
+      <span class="badge">归约 <b>${v.replay}</b></span>
+    </div>
+    <div>
+      <span class="badge">序号范围 <b>#${v.from_seq} ~ #${v.to_seq}</b>（${v.record_count} 条）</span>
+      <span class="badge">封存摘要 <b>${v.seal_digest}</b></span>
+      <span class="badge">来源摘要 <b>${v.source_digest}</b></span>
+    </div>
+    <div>
+      <span class="badge">接收人 <b>${esc(v.receivers.join('、'))}</b></span>
+      <span class="badge">领取人 <b>${v.claimer?esc(v.claimer):'—'}</b></span>
+      <span class="badge">截止 <b>${fmt(v.deadline)}</b></span>
+      <span class="badge">封存于 <b>${fmt(v.sealed_at*1000)}</b></span>
+    </div>
+    <div style="margin:4px 0">领取记号：${claims}</div>
+    ${v.invalid_reason?`<div class="halt">⛔ ${v.status==='EXPIRED'?'超时':'作废'}原因：${esc(v.invalid_reason)}</div>`
+      :'<div class="okbox">✅ 凭证有效：'+(v.claimer?'中签接收人可查阅只读快照':'等待接收人首次领取')+'。</div>'}
+    <div id="snapshot-box"><div class="muted">调用“查阅只读快照”后展示状态截面与逐条前后记录。</div></div>`;
+}
+function renderSnapshot(cv){
+  const s = cv.snapshot;
+  let html = `<div class="okbox">🔒 只读快照（查阅人 ${esc(cv.viewer)}）：封存摘要校验 ${cv.seal_intact?'<b class="ok">通过</b>':'<b class="err">失败</b>'}；
+    封存后正式审计库追加或篡改记录都不改变本截面，也不能借此改写正式数据。</div>
+    <h4 style="margin:6px 0 4px">状态截面（窗口末条事件后）</h4><pre style="background:#0b1119;border-radius:6px;padding:8px;font-size:11px;white-space:pre-wrap;max-height:180px;overflow:auto">${esc(projBrief(s.state_section))}</pre>
+    <h4 style="margin:6px 0 4px">逐条前后记录（${s.records.length}）</h4><div id="timeline">`;
+  for(const e of s.records){
+    html += `<div class="ev"><div class="head"><span class="seq">#${e.seq}</span> <b>${e.type}</b>
+      <span class="muted">${esc(e.actor)}</span><span style="margin-left:auto">${esc(e.summary||'')}</span></div>
+      <div class="states"><div><div class="muted">事件前</div><pre>${esc(projBrief(e.before))}</pre></div>
+      <div><div class="muted">事件后</div><pre>${esc(projBrief(e.after))}</pre></div></div></div>`;
+  }
+  $('snapshot-box').innerHTML = html + '</div>';
+}
+
+// ---------------- 领取 / 查阅 / 作废
+async function claim(){
+  if(!voucher){ say('请先选择凭证', '#d4a72c'); return; }
+  const who = $('who').value.trim();
+  const r = await post(`/api/vouchers/${voucher.id}/claim`, {receiver:who});
+  if(r.status===200){
+    say(`${who} 领取 ${voucher.id}：${r.body.duplicate?'重复请求（幂等返回首次结果）':'首次领取成功（唯一中签）'}`, '#2ea043');
+  } else {
+    say(`${who} 领取被拒（${r.status}）：${r.body.detail}`, r.status===409?'#d4a72c':'#e5534b');
+  }
+  await loadVouchers();
+}
+async function viewContent(){
+  if(!voucher){ say('请先选择凭证', '#d4a72c'); return; }
+  const who = $('who').value.trim();
+  const r = await post(`/api/vouchers/${voucher.id}/content`, {receiver:who});
+  if(r.status!==200){ say(`查阅被拒（${r.status}）：${r.body.detail}`, '#e5534b'); return; }
+  say(`${who} 查阅 ${voucher.id}：只读快照 ${r.body.snapshot.records.length} 条，封存摘要校验 ${r.body.seal_intact?'通过':'失败'}`, '#7fd0ff');
+  renderSnapshot(r.body);
+}
+async function voidVoucher(){
+  if(!voucher){ say('请先选择凭证', '#d4a72c'); return; }
+  const reason = prompt('作废原因：', '外发审批撤销');
+  if(reason===null) return;
+  const r = await post(`/api/vouchers/${voucher.id}/void`, {reason, actor:'分析员'});
+  if(r.status===200) say(`凭证 ${voucher.id} 已作废（快照保留、禁止查阅）${r.body.duplicate?'；重复作废返回首次结果':''}`, '#d4a72c');
+  else say('作废失败：'+r.body.detail, '#e5534b');
+  await loadVouchers();
+}
+async function reopen(){
+  const r = await api('/api/admin/reopen','POST');
+  say('↻ '+r.note, '#7fd0ff');
+  await loadVouchers();
+}
+
+// ---------------- 七条路径演示
+async function freshReplay(){
+  await prepareDemo();
+  const r = currentReplay();
+  $('receivers').value = '监管处,稽查科,第三方审计';
+  fillRange();
+  return r;
+}
+async function demoNormal(){
+  say('—— 路径1：正常查阅 ——', '#7fd0ff');
+  const rp = await freshReplay();
+  const v = await seal({receivers:['监管处','稽查科'], ttl:3600000});
+  if(!v) return;
+  $('who').value = '监管处';
+  await claim(); await viewContent();
+}
+async function demoExpire(){
+  say('—— 路径2：超时拒绝 ——', '#7fd0ff');
+  const rp = await freshReplay();
+  const v = await seal({receivers:['监管处'], ttl:1});
+  if(!v) return;
+  await new Promise(r=>setTimeout(r, 20));   // 等过 1ms 截止时刻
+  $('who').value = '监管处';
+  await claim();            // 410
+  await viewContent();      // 同样 410
+}
+async function demoVoid(){
+  say('—— 路径3：主动作废 ——', '#7fd0ff');
+  const rp = await freshReplay();
+  const v = await seal({receivers:['监管处','稽查科'], ttl:3600000});
+  if(!v) return;
+  $('who').value = '监管处'; await claim();
+  await voidVoucher();
+  await viewContent();      // 410 + 作废原因
+}
+async function demoRace(){
+  say('—— 路径4：多接收人并发首次领取（只有一人成功）——', '#7fd0ff');
+  const rp = await freshReplay();
+  const v = await seal({receivers:['监管处','稽查科','第三方审计'], ttl:3600000});
+  if(!v) return;
+  for(const who of ['监管处','稽查科','第三方审计']){
+    $('who').value = who; await claim();
+  }
+  const g = await api('/api/vouchers/'+v.id);
+  say(`领取记号：${g.claims.map(c=>c.receiver+'='+c.result).join('，')}；唯一中签者 ${g.claimer}`, '#7fd0ff');
+  $('who').value = g.claimer; await viewContent();
+}
+async function demoIdem(){
+  say('—— 路径5：创建与再次索取幂等（同一凭证不出两份内容）——', '#7fd0ff');
+  const rp = await freshReplay();
+  const key = 'demo-key-'+Date.now();
+  const v1 = await seal({receivers:['监管处','稽查科'], ttl:3600000, key});
+  const v2 = await seal({receivers:['监管处','稽查科'], ttl:3600000, key});
+  const same = v1 && v2 && v1.id===v2.id && v1.seal_digest===v2.seal_digest;
+  say(`同幂等键两次封存：${same?'返回同一凭证 '+v1.id+'（无第二份内容）':'出现两份凭证！'}`, same?'#2ea043':'#e5534b');
+  $('who').value = '监管处';
+  await claim(); await claim();        // 中签者重复领取
+  $('who').value = '稽查科';
+  await claim(); await claim();        // 负方重复领取，同一原因
+}
+async function demoAppend(){
+  say('—— 路径6：封存后追加记录不改变快照 ——', '#7fd0ff');
+  const rp = await freshReplay();
+  const v = await seal({receivers:['监管处'], ttl:3600000});
+  if(!v) return;
+  $('who').value = '监管处'; await claim();
+  const c1 = (await post(`/api/vouchers/${v.id}/content`, {receiver:'监管处'})).body;
+  const max1 = (await api('/api/events?limit=1')).seq;
+  for(let i=0;i<3;i++){
+    const r = await post(`/api/tickets/${v.ticket}/shift-evidences`,
+      {client_id:`voucher-demo:${Date.now()}:${i}`, team:'甲班', ts_data:1e13+i, kind:`外发后追加${i}`});
+    if(r.status!==200) say('追加失败：'+r.body.detail, '#e5534b');
+  }
+  const max2 = (await api('/api/events?limit=1')).seq;
+  const c2 = (await post(`/api/vouchers/${v.id}/content`, {receiver:'监管处'})).body;
+  const unchanged = JSON.stringify(c1.snapshot)===JSON.stringify(c2.snapshot);
+  say(`正式审计序列 #${max1} → #${max2}（新记录越过凭证上界 #${v.to_seq}）；已发出截面 ${unchanged?'完全不变':'被污染！'}`,
+      unchanged?'#2ea043':'#e5534b');
+  renderSnapshot(c2);
+}
+async function demoRestart(){
+  say('—— 路径7：重启恢复（阶段/领取记号/作废结果）——', '#7fd0ff');
+  const rp = await freshReplay();
+  const va = await seal({receivers:['监管处','稽查科'], ttl:3600000, key:'rs-a'});
+  $('who').value = '稽查科'; await claim();
+  $('who').value = '监管处'; await claim();          // 负方记号
+  const vb = await seal({from_seq:va.from_seq, to_seq:Math.max(va.from_seq, va.to_seq-1),
+                         receivers:['监管处'], ttl:3600000, key:'rs-b'});
+  const vc = await seal({from_seq:va.from_seq, to_seq:va.from_seq,
+                         receivers:['监管处'], ttl:3600000, key:'rs-c'});
+  await post(`/api/vouchers/${vc.id}/void`, {reason:'重启演示作废', actor:'分析员'});
+  const before = {a:va.id, b:vb.id, c:vc.id};
+  await reopen();
+  const ga = await api('/api/vouchers/'+before.a);
+  const gb = await api('/api/vouchers/'+before.b);
+  const gc = await api('/api/vouchers/'+before.c);
+  const ok = ga.status==='CLAIMED' && ga.claimer==='稽查科'
+    && ga.claims.some(c=>c.receiver==='监管处'&&c.result==='LOST')
+    && gb.status==='SEALED' && gc.status==='VOID';
+  say(`重启后：${ga.id} ${ga.status}/${ga.claimer}（负方记号 ${ga.claims.some(c=>c.result==='LOST')?'在':'丢'}），`+
+      `${gb.id} ${gb.status}，${gc.id} ${gc.status}/${gc.invalid_reason} → ${ok?'完整恢复':'恢复异常'}`,
+      ok?'#2ea043':'#e5534b');
+  await loadVouchers();
+}
+
+// ---------------- 初始化
+$('tid').onchange = refreshReplays;
+$('rid').onchange = ()=>{ renderReplayMeta(); };
+(async () => { await refreshTickets(false); await refreshReplays(); await loadVouchers(); })();
+</script>
+</body>
+</html>

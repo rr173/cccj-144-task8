@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>值守班组换班接续台 · 配电检修安全票</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; background:#0f1620; color:#dbe4ee; }
+  header { padding:10px 18px; background:#16202e; border-bottom:1px solid #263449; display:flex; gap:16px; align-items:center;}
+  header h1 { font-size:17px; margin:0; color:#7fd0ff; }
+  header a { color:#9fb3c8; font-size:13px; }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:10px; padding:10px; }
+  .card { background:#16202e; border:1px solid #263449; border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:#7fd0ff; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:13px; margin:2px;}
+  button:hover { background:#388bfd; }
+  button.ghost { background:#2a3a4f; }
+  button.danger { background:#b8323e; }
+  button.warn { background:#8a6d1a; }
+  button:disabled { background:#3a4a5f; cursor:not-allowed; }
+  input,select { background:#0b1119; color:#dbe4ee; border:1px solid #33465e; border-radius:5px; padding:4px 8px; font-size:13px; margin:2px;}
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { padding:4px 6px; border-bottom:1px solid #22303f; text-align:left; vertical-align:top;}
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11.5px; margin:1px;}
+  .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12.5px; margin:2px 4px 2px 0; background:#22303f;}
+  .badge b { color:#7fd0ff; }
+  .badge.owner { background:#1a7f4b; color:#fff; } .badge.owner b { color:#fff; }
+  .ho-PENDING { background:#8a6d1a; } .ho-SIGNED { background:#1f6feb; }
+  .ho-COMPLETED { background:#1a7f4b; } .ho-CLOSED { background:#5a3038; }
+  .se-ACCEPTED { color:#2ea043; } .se-SUSPENDED { color:#d4a72c; } .se-REJECTED { color:#e5534b; }
+  .tag.se-ACCEPTED { background:#143a24; } .tag.se-SUSPENDED { background:#3d3416; } .tag.se-REJECTED { background:#3d1d1f; }
+  #script-log { max-height:300px; overflow-y:auto; font-size:12.5px; font-family:ui-monospace,monospace; background:#0b1119; border-radius:6px; padding:8px;}
+  #script-log div { padding:2px 4px; border-bottom:1px solid #1c2836; white-space:pre-wrap;}
+  #events { max-height:220px; overflow-y:auto; font-size:12px; font-family:ui-monospace,monospace;}
+  #events div { padding:2px 4px; border-bottom:1px solid #1c2836; white-space:pre-wrap;}
+  .console { border:1px solid #2a3a4f; border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+  .console h4 { margin:0 0 6px; font-size:13.5px; }
+  .console.from h4 { color:#ffb454; } .console.to h4 { color:#6fd3a7; }
+  .muted { color:#8fa3b8; font-size:12px; }
+  .ok { color:#2ea043; } .err { color:#e5534b; } .warn-t { color:#d4a72c; }
+  .full { grid-column: 1 / -1; }
+  .reason { color:#9fb3c8; font-size:11.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔁 值守班组换班接续台</h1>
+  <a href="/" target="_blank">→ 调度端</a>
+  <a href="/field" target="_blank">→ 现场操作页面</a>
+  <a href="/replay" target="_blank">→ 审计事件回放</a>
+  <a href="/report" target="_blank">→ 事故分析报告</a>
+  <span id="clock" style="margin-left:auto;font-size:12px;color:#9fb3c8"></span>
+</header>
+<main>
+  <!-- ================= 调度席 ================= -->
+  <section>
+    <div class="card">
+      <h3>调度席 · 工作票与换班状态</h3>
+      <div>
+        工作票：<select id="tid"></select>
+        <button onclick="prepare()">⚡ 一键准备演示票</button>
+        <button class="warn" onclick="reopen()">↻ 模拟主站重启</button>
+      </div>
+      <div style="margin-top:6px">
+        <span class="badge owner">当前班组（写权）<b id="v-owner">—</b></span>
+        <span class="badge">切换水位 <b id="v-watermark">—</b></span>
+        <span class="badge">交班单阶段 <b id="v-phase">—</b></span>
+        <span class="badge">证据链头 <b id="v-head">—</b></span>
+        <span class="badge">票据 <b id="v-tstatus">—</b></span>
+      </div>
+      <div class="muted" id="v-hint" style="margin-top:4px"></div>
+    </div>
+
+    <div class="card">
+      <h3>开具交班单（调度席）</h3>
+      <div>
+        移交方 <input id="h-from" size="6" readonly title="移交方=当前持权班组">
+        候选承接 <input id="h-cands" size="14" value="乙班" title="逗号分隔，可多个候选争抢签收">
+        切换水位 <select id="h-watermark">
+          <option value="0">当前时刻</option>
+          <option value="60000">1 分钟后</option>
+          <option value="300000">5 分钟后</option>
+        </select>
+        签收期限 <select id="h-deadline">
+          <option value="600000">10 分钟</option>
+          <option value="30000">30 秒</option>
+          <option value="2000">2 秒（演示超时）</option>
+        </select>
+        <button onclick="createHandover()">开具交班单</button>
+      </div>
+      <div class="muted">签收前写权仍归移交方；签收把写权原子转给承接方。水位线之前的合法迟到内容仍可入账，越线后移交方内容拒收。</div>
+      <table id="handovers" style="margin-top:6px"><thead><tr>
+        <th>交班单</th><th>移交 → 承接</th><th>切换水位</th><th>签收期限</th><th>阶段</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+
+    <div class="card">
+      <h3>票据操作（换班关闭触发器）</h3>
+      <button class="warn" onclick="ticketOp('freeze')">🔒 锁定工作票</button>
+      <button class="ghost" onclick="ticketOp('unfreeze')">🔓 解除锁定</button>
+      <button class="danger" onclick="ticketOp('withdraw')">✂ 计划取消（撤回）</button>
+      <span class="muted">锁定 / 边界重算 / 计划取消 / 超时会关闭尚未完成的换班；既成设备动作与控制锁不回退。</span>
+      <div id="op-msg" style="font-size:12.5px;margin-top:4px"></div>
+    </div>
+
+    <div class="card">
+      <h3>双方数据进度</h3>
+      <table id="progress"><thead><tr>
+        <th>班组</th><th>角色</th><th>入账</th><th>其中迟到</th><th>挂起</th><th>拒收</th><th>最近数据时标</th><th>链上末位</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <!-- ================= 作业设备 ================= -->
+  <section>
+    <div class="card">
+      <h3>作业设备台 · 移交设备（旧班组）</h3>
+      <div class="console from">
+        <h4>📟 移交设备 · <span id="from-team-label">—</span></h4>
+        数据时标 <select id="from-ts">
+          <option value="in">水位线内（水位 −2s，迟到补录）</option>
+          <option value="now">现在</option>
+          <option value="over">越过水位（水位 +2s，越线写入）</option>
+        </select>
+        内容 <input id="from-payload" size="16" value="巡视：无异常">
+        <button onclick="sendFrom()">发送现场证据</button>
+        <div class="muted" id="from-msg"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>作业设备台 · 承接设备（候选班组）</h3>
+      <div class="console to">
+        <h4>📟 承接设备 · <select id="to-team" style="font-size:13px"></select></h4>
+        <div>
+          <button onclick="sign()">✍ 签收交班单（原子取得写权）</button>
+          <button class="ghost" onclick="signTwice()">重复签收（幂等）</button>
+          <span class="muted" id="sign-msg"></span>
+        </div>
+        <div style="margin-top:4px">
+          数据时标 <select id="to-ts">
+            <option value="over">越过水位（水位 +2s，新历元）</option>
+            <option value="now">现在</option>
+            <option value="in">水位线内（水位 −2s，回填旧历元）</option>
+          </select>
+          内容 <input id="to-payload" size="14" value="接班首巡：正常">
+          接续基点 <select id="to-base">
+            <option value="head">当前链头（自动）</option>
+            <option value="stale">过期基点（演示接不上旧链）</option>
+          </select>
+          <button onclick="sendTo()">发送现场证据</button>
+          <button class="ghost" onclick="rebaseTo()">修正基点重传挂起件</button>
+        </div>
+        <div class="muted" id="to-msg"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>演示剧本（一键复现并发/异常场景）</h3>
+      <div>
+        <button onclick="run(demo1)">① 签收前移交方续送</button>
+        <button onclick="run(demo2)">② 签收后承接方续作</button>
+        <button onclick="run(demo3)">③ 移交方越线写入</button>
+        <button onclick="run(demo4)">④ 两班组争抢签收</button>
+        <button onclick="run(demo5)">⑤ 调度撤单</button>
+        <button onclick="run(demo6)">⑥ 锁定期间签收失败</button>
+        <button onclick="run(demo7)">⑦ 进程恢复后继续换班</button>
+        <button onclick="run(demo8)">⑧ 交班单超时关闭</button>
+      </div>
+      <div id="script-log" style="margin-top:6px"></div>
+    </div>
+  </section>
+
+  <!-- ================= 全宽 ================= -->
+  <section class="full">
+    <div class="card">
+      <h3>现场证据流（每条内容的处理原因）</h3>
+      <table id="evidences"><thead><tr>
+        <th>#</th><th>链序</th><th>班组</th><th>设备</th><th>类型</th><th>数据时标</th><th>内容</th><th>状态</th><th>处理原因</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h3>审计事件流</h3>
+      <div id="events"></div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let view = null, lastEventSeq = 0, busy = false;
+
+async function api(path, method='GET', body){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+async function post(path, body){   // 不抛异常版：剧本需要观察失败响应
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  const j = await r.json().catch(()=>({}));
+  return {status:r.status, body:j};
+}
+const fmt = ms => ms==null ? '—' : new Date(ms).toLocaleTimeString('zh-CN',{hour12:false}) + '.' + String(ms%1000).padStart(3,'0');
+const cid = () => 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+function say(msg, cls){
+  const d = document.createElement('div');
+  d.textContent = `[${new Date().toLocaleTimeString('zh-CN',{hour12:false})}] ${msg}`;
+  if(cls) d.style.color = cls;
+  $('script-log').prepend(d);
+}
+async function run(fn){ if(busy){ say('上一个剧本仍在执行…', '#d4a72c'); return; } busy=true;
+  try{ await fn(); }catch(e){ say('剧本异常：'+(e.detail||e.message||e), '#e5534b'); }
+  busy=false; await refresh(); }
+
+// ---------------- 状态刷新与渲染
+async function refreshTickets(keep){
+  const ts = await api('/api/tickets');
+  const sel = $('tid'); const cur = keep ? sel.value : null;
+  sel.innerHTML = '';
+  for(const t of ts){
+    const o = document.createElement('option');
+    o.value = t.id;
+    o.textContent = `${t.id} ${t.title} [${t.status}${t.frozen?'/锁定':''}] 持权:${t.write_owner||'-'}`;
+    sel.appendChild(o);
+  }
+  if(cur && [...sel.options].some(o=>o.value===cur)) sel.value = cur;
+  if(!sel.value && sel.options.length) sel.value = sel.options[sel.options.length-1].value;
+}
+const PHASE = {PENDING:'待签收', SIGNED:'已签收·待接续', COMPLETED:'接续完成', CLOSED:'已关闭'};
+async function refresh(){
+  await refreshTickets(true);
+  const tid = $('tid').value;
+  if(!tid){ return; }
+  view = await api(`/api/tickets/${tid}/shift`);
+  render();
+  await refreshEvents();
+}
+function teamRole(team){
+  const h = view.handover;
+  if(h){
+    if(team === h.from_team) return '移交方';
+    if(h.signer === team) return '承接方（已签收）';
+    if((h.candidates||[]).includes(team)) return '候选承接';
+  }
+  if(team === view.ticket.write_owner) return '持权班组';
+  return '—';
+}
+function render(){
+  const v = view, t = v.ticket, h = v.handover;
+  $('v-owner').textContent = t.write_owner || '—';
+  $('v-watermark').textContent = h ? fmt(h.watermark) : '—';
+  $('v-phase').innerHTML = h ? `<span class="tag ho-${h.status}">${PHASE[h.status]}</span>` : '无交班单';
+  $('v-head').textContent = `#${v.chain_head.seq} ${v.chain_head.hash.slice(0,8)}`;
+  $('v-tstatus').textContent = `${t.status}${t.frozen?' / 🔒锁定':''}`;
+  $('v-hint').textContent =
+    h ? (h.status==='PENDING' ? `签收前写权仍归移交方 ${h.from_team}；候选 ${h.candidates.join('、')} 可签收。`
+      : h.status==='SIGNED' ? `写权已归承接方 ${h.signer}，等待其首条越水位内容接续旧链。`
+      : h.status==='COMPLETED' ? `承接方 ${h.signer} 已接续旧链，换班完成；移交方仅余水位线内迟到入账权。`
+      : `交班单已关闭：${h.close_reason||''}`) : '当前无交班单：仅持权班组可追加现场证据。';
+  $('from-team-label').textContent = h ? h.from_team : t.write_owner;
+  // 承接设备班组下拉
+  const toSel = $('to-team'); const curTo = toSel.value;
+  toSel.innerHTML = '';
+  const cands = h ? (h.signer ? [h.signer] : h.candidates) : [];
+  for(const c of cands){ const o=document.createElement('option'); o.value=c; o.textContent=c; toSel.appendChild(o); }
+  if(curTo && cands.includes(curTo)) toSel.value = curTo;
+  // 交班单表
+  const hb = $('handovers').querySelector('tbody'); hb.innerHTML='';
+  for(const x of v.handovers){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><b>${x.id}</b></td>
+      <td>${x.from_team} → ${x.signer ? `<b>${x.signer}</b>` : x.candidates.join('、')}</td>
+      <td>${fmt(x.watermark)}</td><td>${fmt(x.deadline)}</td>
+      <td><span class="tag ho-${x.status}">${PHASE[x.status]}</span>${x.close_reason?`<br><span class="reason">${x.close_reason}</span>`:''}</td>
+      <td>${x.status==='PENDING'?`<button class="danger" onclick="cancelHandover('${x.id}')">撤单</button>`:''}</td>`;
+    hb.appendChild(tr);
+  }
+  // 双方数据进度
+  const pb = $('progress').querySelector('tbody'); pb.innerHTML='';
+  for(const [team,p] of Object.entries(v.progress)){
+    const tr = document.createElement('tr');
+    if(team === t.write_owner) tr.style.background = '#14301f';
+    tr.innerHTML = `<td><b>${team}</b></td><td>${teamRole(team)}</td>
+      <td class="ok">${p.accepted}</td><td>${p.late?'⏰'+p.late:'0'}</td>
+      <td class="warn-t">${p.suspended}</td><td class="err">${p.rejected}</td>
+      <td>${fmt(p.last_ts)}</td><td>${p.last_seq!=null?'#'+p.last_seq:'—'}</td>`;
+    pb.appendChild(tr);
+  }
+  // 证据流
+  const eb = $('evidences').querySelector('tbody'); eb.innerHTML='';
+  for(const e of [...v.evidences].reverse()){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${e.id}</td><td>${e.seq!=null?'#'+e.seq:'—'}${e.late?' ⏰':''}</td>
+      <td>${e.team}</td><td>${e.device}</td><td>${e.kind}</td><td>${fmt(e.ts_data)}</td>
+      <td>${e.payload||''}</td>
+      <td><span class="tag se-${e.status}">${e.status}</span></td>
+      <td class="reason">${e.reason||''}</td>`;
+    eb.appendChild(tr);
+  }
+}
+async function refreshEvents(){
+  const tid = $('tid').value; if(!tid) return;
+  const es = await api(`/api/events?since=${lastEventSeq}&ticket=${tid}`);
+  if(!es.length) return;
+  lastEventSeq = Math.max(lastEventSeq, ...es.map(e=>e.seq));
+  for(const e of es.reverse()){
+    const d = document.createElement('div');
+    d.textContent = `#${e.seq} [${e.type}] ${e.actor} ${e.payload}`;
+    if(/HANDOVER|FREEZE/.test(e.type)) d.style.color = '#7fd0ff';
+    if(e.type==='SHIFT_EVIDENCE' && /REJECT/.test(e.payload)) d.style.color = '#e5534b';
+    $('events').prepend(d);
+  }
+}
+
+// ---------------- 调度席动作
+async function prepare(){
+  const r = await post('/api/demo/shift/prepare', {work_area:['F1'], team:'甲班'});
+  if(r.status!==201){ say('准备演示票失败：'+(r.body.detail||''), '#e5534b'); return null; }
+  await refreshTickets(false);
+  $('tid').value = r.body.ticket.id;
+  await refresh();
+  say(`已开具演示票 ${r.body.ticket.id}（隔离完成、许可开工，持权班组 甲班）`);
+  return r.body.ticket.id;
+}
+async function reopen(){
+  const r = await post('/api/admin/reopen');
+  say(r.body.note || '主站已重启', '#7fd0ff');
+  await refresh();
+}
+async function createHandover(){
+  const tid = $('tid').value; if(!tid) return;
+  const body = {watermark: Date.now()+ +$('h-watermark').value,
+    candidates: $('h-cands').value.split(/[,，]/).map(s=>s.trim()).filter(Boolean),
+    deadline: Date.now()+ +$('h-deadline').value, created_by:'调度员'};
+  const r = await post(`/api/tickets/${tid}/handovers`, body);
+  if(r.status!==201){ say('开具交班单失败：'+(r.body.detail||''), '#e5534b'); }
+  else say(`已开具交班单 ${r.body.id}：${r.body.from_team} → 候选 ${r.body.candidates.join('、')}，水位 ${fmt(r.body.watermark)}`);
+  await refresh();
+  return r.body;
+}
+async function cancelHandover(hid){
+  const r = await post(`/api/handovers/${hid}/cancel`, {actor:'调度员', reason:'调度计划调整'});
+  say(r.status===200 ? `交班单 ${hid} 已撤单` : `撤单失败：${r.body.detail}`, r.status===200?null:'#e5534b');
+  await refresh();
+}
+async function ticketOp(op){
+  const tid = $('tid').value; if(!tid) return;
+  const r = await post(`/api/tickets/${tid}/${op}`, {actor:'调度员', reason: op==='freeze'?'调度锁定（演示）':'调度决定'});
+  $('op-msg').textContent = r.status===200 ? `${op} 成功` : `${op} 被拒：${r.body.detail}`;
+  $('op-msg').style.color = r.status===200 ? '#2ea043' : '#e5534b';
+  await refresh();
+}
+
+// ---------------- 作业设备动作
+function tsOf(mode){
+  const w = view && view.handover ? view.handover.watermark : Date.now();
+  return mode==='in' ? w-2000 : mode==='over' ? w+2000 : Date.now();
+}
+function teamOnChain(team){ const p = view.progress[team]; return p && p.accepted>0; }
+async function send(team, tsMode, baseMode, payload, device){
+  const h = view.handover;
+  const body = {client_id: cid(), team, device: device||'F1', kind:'巡检记录',
+                ts_data: tsOf(tsMode), payload: payload||''};
+  if(h && h.signer === team && !teamOnChain(team)){
+    body.base_seq = baseMode==='stale' ? Math.max(0, view.chain_head.seq-1) : view.chain_head.seq;
+  }
+  const r = await post(`/api/tickets/${$('tid').value}/shift-evidences`, body);
+  const e = r.body.evidence || {};
+  const line = `${team} 发送「${body.payload}」（时标${tsMode==='over'?'越线':tsMode==='in'?'水位内':'现在'}）→ ${e.status||r.status}：${e.reason||r.body.detail||''}`;
+  say(line, e.status==='ACCEPTED' ? '#2ea043' : e.status==='SUSPENDED' ? '#d4a72c' : '#e5534b');
+  await refresh();
+  return r;
+}
+async function sendFrom(){ const t = view.handover ? view.handover.from_team : view.ticket.write_owner;
+  const r = await send(t, $('from-ts').value, 'head', $('from-payload').value);
+  $('from-msg').textContent = r.body.evidence ? r.body.evidence.reason : (r.body.detail||''); }
+async function sendTo(){ const t = $('to-team').value; if(!t){ say('无候选承接班组', '#e5534b'); return; }
+  const r = await send(t, $('to-ts').value, $('to-base').value, $('to-payload').value);
+  $('to-msg').textContent = r.body.evidence ? r.body.evidence.reason : (r.body.detail||''); }
+async function rebaseTo(){
+  const t = $('to-team').value;
+  const sus = view.evidences.filter(e=>e.team===t && e.status==='SUSPENDED');
+  if(!sus.length){ say(`${t} 没有挂起件`, '#d4a72c'); return; }
+  const e = sus[sus.length-1];
+  const r = await post(`/api/tickets/${$('tid').value}/shift-evidences`,
+    {client_id:e.client_id, team:e.team, device:e.device, kind:e.kind, ts_data:e.ts_data,
+     payload:e.payload, base_seq:view.chain_head.seq});
+  const ne = r.body.evidence||{};
+  say(`${t} 修正基点重传 #${e.id}（基点 #${view.chain_head.seq}）→ ${ne.status}：${ne.reason||''}`,
+      ne.status==='ACCEPTED'?'#2ea043':'#d4a72c');
+  await refresh();
+}
+async function signReq(team){ return post(`/api/handovers/${view.handover.id}/sign`, {team}); }
+async function sign(){
+  const t = $('to-team').value; if(!view.handover){ say('当前无交班单', '#e5534b'); return; }
+  const r = await signReq(t);
+  $('sign-msg').textContent = r.status===200 ? `签收成功：写权已原子转移给 ${t}` : `签收失败：${r.body.detail}`;
+  say(r.status===200 ? `✍ ${t} 签收成功：写权 ${view.handover.from_team} → ${t}（原子转移）`
+                     : `✍ ${t} 签收被拒：${r.body.detail}`, r.status===200?'#2ea043':'#e5534b');
+  await refresh();
+}
+async function signTwice(){
+  const t = $('to-team').value; if(!view.handover){ say('当前无交班单', '#e5534b'); return; }
+  const r1 = await signReq(t);
+  say(`第一次签收：${r1.status===200?'成功':r1.body.detail}`, r1.status===200?'#2ea043':'#e5534b');
+  const r2 = await signReq(t);
+  say(`重复签收：${r2.status===200?'幂等返回首次结果（无二次状态变化）':r2.body.detail}`, '#d4a72c');
+  await refresh();
+}
+
+// ---------------- 演示剧本
+async function mkHandover(cands){
+  const body = {watermark: Date.now(), candidates: cands||['乙班'],
+                deadline: Date.now()+600000, created_by:'调度员'};
+  const r = await post(`/api/tickets/${$('tid').value}/handovers`, body);
+  if(r.status!==201){ say('开具交班单失败：'+(r.body.detail||''), '#e5534b'); return null; }
+  await refresh();
+  say(`交班单 ${r.body.id}：移交 ${r.body.from_team}，候选 ${r.body.candidates.join('、')}，水位 ${fmt(r.body.watermark)}`);
+  return r.body;
+}
+async function demo1(){
+  say('—— ① 签收前移交方续送 / 承接首批数据挂起 ——', '#7fd0ff');
+  if(!await prepare()) return;
+  if(!await mkHandover(['乙班'])) return;
+  await send('甲班', 'in', 'head', '交接前巡视#1');
+  await send('甲班', 'in', 'head', '交接前巡视#2（签收前写权仍归移交方）');
+  await send('乙班', 'over', 'head', '承接设备首批数据（提前到达）');
+  say('结论：签收前移交方正常入账；承接方首批数据因写权未转移而挂起。', '#7fd0ff');
+}
+async function demo2(){
+  say('—— ② 签收后承接方续作（挂起自动唤醒）——', '#7fd0ff');
+  if(!await prepare()) return;
+  if(!await mkHandover(['乙班'])) return;
+  await send('乙班', 'over', 'head', '承接首批数据（签收前到达，挂起）');
+  await sign();
+  await send('乙班', 'over', 'head', '接班后续作#1');
+  say('结论：签收原子转移写权，挂起首批自动唤醒入账，承接方续作畅通，交班单进入「接续完成」。', '#7fd0ff');
+}
+async function demo3(){
+  say('—— ③ 移交方越线写入拒收 / 合法迟到入账 ——', '#7fd0ff');
+  if(!await prepare()) return;
+  if(!await mkHandover(['乙班'])) return;
+  await sign();
+  await send('甲班', 'over', 'head', '移交方越线写入（应拒收）');
+  await send('甲班', 'in', 'head', '移交方迟到补录（水位线内，应入账）');
+  say('结论：越线后移交方内容拒收；水位线之前的合法迟到内容仍可入账（标 ⏰）。', '#7fd0ff');
+}
+async function demo4(){
+  say('—— ④ 两个候选班组争抢签收 ——', '#7fd0ff');
+  if(!await prepare()) return;
+  if(!await mkHandover(['乙班','丙班'])) return;
+  const [a,b] = await Promise.all([signReq('乙班'), signReq('丙班')]);
+  const win = a.status===200 ? '乙班' : b.status===200 ? '丙班' : '无';
+  say(`并发签收结果：乙班 ${a.status}（${a.body.detail||'成功'}）；丙班 ${b.status}（${b.body.detail||'成功'}）`);
+  say(`结论：只有 ${win} 取得写权（CAS 原子转移），负方收到确定失败原因。`, '#7fd0ff');
+  await refresh();
+}
+async function demo5(){
+  say('—— ⑤ 调度撤单 ——', '#7fd0ff');
+  if(!await prepare()) return;
+  const h = await mkHandover(['乙班']); if(!h) return;
+  await send('乙班', 'over', 'head', '承接首批数据（挂起待签收）');
+  const r = await post(`/api/handovers/${h.id}/cancel`, {actor:'调度员', reason:'调度计划调整'});
+  say(`调度撤单：${r.status===200?'成功，交班单关闭，挂起内容随之拒收':r.body.detail}`, '#d4a72c');
+  await refresh();
+  const s = await post(`/api/handovers/${h.id}/sign`, {team:'乙班'});
+  say(`撤单后签收：${s.status} ${s.body.detail||''}`, '#e5534b');
+  await refresh();
+}
+async function demo6(){
+  say('—— ⑥ 锁定期间签收失败 ——', '#7fd0ff');
+  if(!await prepare()) return;
+  const h = await mkHandover(['乙班']); if(!h) return;
+  await ticketOp('freeze');
+  say('工作票已锁定：未完成的交班单被关闭（既成设备动作与控制锁不回退）', '#d4a72c');
+  const s = await post(`/api/handovers/${h.id}/sign`, {team:'乙班'});
+  say(`锁定期间签收：${s.status} ${s.body.detail||''}`, '#e5534b');
+  await refresh();
+}
+async function demo7(){
+  say('—— ⑦ 进程恢复后继续换班 ——', '#7fd0ff');
+  if(!await prepare()) return;
+  if(!await mkHandover(['乙班'])) return;
+  await send('乙班', 'over', 'head', '承接首批数据（挂起）');
+  const before = {owner: view.ticket.write_owner, suspended: view.evidences.filter(e=>e.status==='SUSPENDED').length,
+                  phase: view.handover.status};
+  await reopen();
+  const after = {owner: view.ticket.write_owner, suspended: view.evidences.filter(e=>e.status==='SUSPENDED').length,
+                 phase: view.handover.status};
+  const same = JSON.stringify(before)===JSON.stringify(after);
+  say(`重启前 ${JSON.stringify(before)} → 恢复后 ${JSON.stringify(after)}：${same?'完全一致 ✓':'不一致 ✗'}`, same?'#2ea043':'#e5534b');
+  await sign();
+  say('结论：进程恢复后写权归属与挂起内容和故障前相同，换班继续推进（签收→挂起唤醒→接续完成）。', '#7fd0ff');
+}
+async function demo8(){
+  say('—— ⑧ 交班单超时关闭 ——', '#7fd0ff');
+  if(!await prepare()) return;
+  const body = {watermark: Date.now(), candidates:['乙班'], deadline: Date.now()+2000, created_by:'调度员'};
+  const r = await post(`/api/tickets/${$('tid').value}/handovers`, body);
+  if(r.status!==201){ say('开具交班单失败：'+(r.body.detail||''), '#e5534b'); return; }
+  say(`交班单 ${r.body.id} 签收期限 2 秒，等待超时…`);
+  await sleep(2600); await refresh();
+  say(`超时后交班单阶段：${view.handover ? PHASE[view.handover.status] : view.handovers.map(x=>PHASE[x.status]).join(',')}`, '#d4a72c');
+  const s = await post(`/api/handovers/${r.body.id}/sign`, {team:'乙班'});
+  say(`超时后签收：${s.status} ${s.body.detail||''}`, '#e5534b');
+  await refresh();
+}
+
+// ---------------- 启动
+$('tid').onchange = refresh;
+setInterval(()=>{ $('clock').textContent = '主站时间 ' + new Date().toLocaleTimeString('zh-CN',{hour12:false}); }, 500);
+setInterval(()=>{ if(!busy) refresh(); }, 2000);
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>现场操作 · 配电检修安全票</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.6 "PingFang SC","Microsoft YaHei",sans-serif; background:#101820; color:#e6edf3; }
+  header { padding:10px 16px; background:#182230; border-bottom:1px solid #2a3a4f; display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+  header b { color:#7fd0ff; }
+  main { max-width:860px; margin:0 auto; padding:12px; }
+  .card { background:#182230; border:1px solid #2a3a4f; border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  button { background:#1f6feb; color:#fff; border:0; border-radius:6px; padding:8px 16px; font-size:15px; cursor:pointer; margin:3px;}
+  button:disabled { background:#3a4a5f; cursor:not-allowed; }
+  button.ghost { background:#2a3a4f; }
+  button.warn { background:#8a6d1a; }
+  input,select { background:#0d141d; color:#e6edf3; border:1px solid #33465e; border-radius:6px; padding:7px 10px; font-size:15px; margin:2px;}
+  .step { border:1px solid #2a3a4f; border-radius:8px; padding:8px 12px; margin:6px 0; }
+  .step.cur { border-color:#1f6feb; background:#152238; }
+  .PENDING { color:#8fa3b8; } .REPORTED { color:#d4a72c; } .VERIFIED { color:#2ea043; }
+  #msg { min-height:24px; color:#d4a72c; }
+  .ok { color:#2ea043; } .err { color:#e5534b; }
+  #offline-banner { display:none; background:#8a6d1a; color:#fff; padding:6px 12px; border-radius:6px; margin-bottom:8px;}
+  .frozen-banner { background:#b8323e; color:#fff; padding:6px 12px; border-radius:6px; margin-bottom:8px;}
+  .pkg-ACTIVE { background:#1f6feb; } .pkg-PARTIAL { background:#8a6d1a; }
+  .pkg-COMPLETED { background:#1a7f4b; } .pkg-VOID,.pkg-EXPIRED { background:#5a3038; }
+  .pkg-SUPERSEDED { background:#4a4458; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:9px; font-size:12px; }
+  .ev-PENDING { color:#6b7a8d; } .ev-WAITING { color:#d4a72c; }
+  .ev-ACCEPTED { color:#2ea043; } .ev-REJECTED,.ev-DUP_CONFLICT { color:#e5534b; }
+  .chain4 { display:grid; grid-template-columns:repeat(4,1fr); gap:5px; margin:6px 0; font-size:12px; }
+  .chain4 div { border:1px solid #2a3a4f; border-radius:6px; padding:4px 6px; min-height:40px; }
+  .scope { font-size:12.5px; color:#9fb3c8; }
+  .cursor { font-family:ui-monospace,monospace; font-size:11.5px; color:#8fa3b8; }
+  details summary { cursor:pointer; color:#7fd0ff; }
+</style>
+</head>
+<body>
+<header>
+  <b>🔧 现场操作终端</b>
+  <span>操作人 <input id="me" size="6" value="张三"></span>
+  <span>复核人 <input id="checker" size="6" value="李四"></span>
+  <label style="background:#8a6d1a;padding:4px 10px;border-radius:6px"><input type="checkbox" id="offline"> 断网模式</label>
+  <a href="/" style="margin-left:auto;color:#9fb3c8;font-size:13px">→ 调度端</a>
+  <a href="/replay" style="color:#9fb3c8;font-size:13px">→ 审计回放</a>
+</header>
+<main>
+  <div id="offline-banner">📵 断网模式：所有动作只在本地生成证据链（以前一条摘要为父节点），不访问主站；恢复网络后整包补传，服务端事务裁决。</div>
+  <div class="card">
+    安全票：<select id="ticket-sel" onchange="loadTicket()"></select>
+    <span id="t-status"></span>
+  </div>
+  <div id="frozen-box"></div>
+
+  <div class="card">
+    <h3 style="margin:0 0 6px">📡 无网作业授权包</h3>
+    <div id="pkg-list"></div>
+  </div>
+
+  <div class="card" id="work-card" style="display:none">
+    <h3 style="margin:0 0 6px">断网作业（授权包 <span id="cur-pkg"></span>）</h3>
+    <div class="scope" id="cur-scope"></div>
+    <div id="cur-step" style="font-size:16px;margin:8px 0"></div>
+    <div style="margin:6px 0">
+      扫码/输入设备号：<input id="scan" size="12" placeholder="如 SW103">
+      <button class="ghost" onclick="evScan()">① 扫码取证</button>
+      <span id="scan-info" class="scope"></span>
+    </div>
+    <button onclick="evLive()">② 设备实况取证</button>
+    <button onclick="evOperate()">③ 执行设备操作并生成执行确认</button>
+    <button class="warn" onclick="evGuard()">④ 监护确认</button>
+    <div class="chain4" id="cur-chain"></div>
+  </div>
+
+  <div class="card">
+    <button onclick="syncPkg()">📶 恢复网络：整包补传/续传授权包</button>
+    <span id="sync-msg"></span>
+    <div class="cursor" id="cursor-info"></div>
+  </div>
+
+  <div id="msg"></div>
+
+  <div class="card">
+    <details open><summary>授权包证据链与逐记录裁决</summary><div id="pkg-detail"></div></details>
+  </div>
+
+  <div class="card">
+    <details><summary>在线常规步骤清单（无授权包时使用）</summary><div id="steps"></div></details>
+  </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let ticket=null, tickets=[], pkg=null, chain=loadChain(), curStepSeq=null;
+$('offline').onchange=e=>{ $('offline-banner').style.display=e.target.checked?'block':'none'; saveChain(); renderPkg(); };
+
+// ---------- 与服务端一致的规范化与摘要（SHA-256 前16位）
+const FIELDS=['pkg','seq','type','step','actor','scanned','device_state','grounded','energized','ts'];
+function norm(v){
+  if(Array.isArray(v)) return v.map(norm);
+  if(v && typeof v==='object'){
+    const o={}; for(const k of Object.keys(v).sort()) if(v[k]!==null && v[k]!==undefined) o[k]=norm(v[k]); return o;
+  }
+  return v;
+}
+function canon(o){ return JSON.stringify(norm(o)); }
+async function sha16(prev, o){
+  const buf=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canon(o)+'|'+(prev||'GENESIS')));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,16);
+}
+function loadChain(){ try{ return JSON.parse(localStorage.getItem('offchain')||'{}'); }catch(e){ return {}; } }
+function saveChain(){ localStorage.setItem('offchain',JSON.stringify(chain)); }
+
+async function api(path, method='GET', body){
+  const r=await fetch(path,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) throw {status:r.status, detail:j.detail||r.statusText};
+  return j;
+}
+function say(t, ok){ $('msg').innerHTML=`<span class="${ok?'ok':'err'}">${t}</span>`; }
+
+async function refreshList(){
+  tickets=(await api('/api/tickets')).filter(t=>['ISOLATING','PERMITTED','RESTORING'].includes(t.status));
+  const sel=$('ticket-sel'); const cur=sel.value;
+  sel.innerHTML='';
+  for(const t of tickets){ const o=document.createElement('option'); o.value=t.id; o.textContent=`${t.id} ${t.title} [${t.status}${t.frozen?'/冻结':''}]`; sel.appendChild(o);}
+  if(cur && tickets.some(t=>t.id===cur)) sel.value=cur;
+  loadTicket();
+}
+async function loadTicket(){
+  const id=$('ticket-sel').value;
+  if(!id){ ticket=null; $('steps').textContent='无在办票据'; $('pkg-list').innerHTML=''; return; }
+  ticket=await api('/api/tickets/'+id);
+  $('t-status').textContent=`状态 ${ticket.status}${ticket.frozen?'（已冻结）':''}`;
+  $('frozen-box').innerHTML=ticket.frozen?`<div class="frozen-banner">⚠ 票据已冻结：${ticket.freeze_reason}</div>`:'';
+  await loadPkgList();
+  renderSteps();
+}
+async function loadPkgList(){
+  const box=$('pkg-list'); box.innerHTML='加载中…';
+  let ps=[]; try{ ps=await api(`/api/tickets/${ticket.id}/offline-packages`); }catch(e){ box.textContent='无授权包'; return; }
+  if(!ps.length){ box.innerHTML='<span class="scope">该票暂无无网作业授权包，请由调控端下发。</span>'; pkg=null; renderPkg(); return; }
+  box.innerHTML='';
+  for(const p of ps){
+    const b=p.by_status;
+    const row=document.createElement('div');
+    row.style.cssText='border:1px solid #2a3a4f;border-radius:8px;padding:8px;margin:6px 0;cursor:pointer';
+    row.innerHTML=`<span class="tag pkg-${p.status}">${p.status}</span> <b>${p.id}</b>
+      步骤 ${p.seg_from}→${p.seg_to}｜v${p.snapshot}｜${p.executor}/${p.guardian}｜截止 ${new Date(p.deadline).toLocaleString('zh-CN',{hour12:false})}
+      <div class="scope">scope ${p.scope_hash}｜链路 ${p.chain_continuous?'<span class="ev-ACCEPTED">连续</span>':'<span class="ev-WAITING">缺口/驳回</span>'}
+        ｜游标 ${p.sync_cursor}/${p.records_total}
+        ｜<span class="ev-PENDING">未传${b.PENDING}</span> <span class="ev-WAITING">待补${b.WAITING}</span>
+        <span class="ev-ACCEPTED">采纳${b.ACCEPTED}</span> <span class="ev-REJECTED">驳回${b.REJECTED+b.DUP_CONFLICT}</span></div>`;
+    row.onclick=()=>selectPkg(p.id);
+    box.appendChild(row);
+  }
+  // 自动选中第一个在途授权包
+  const live=ps.find(p=>['ACTIVE','PARTIAL'].includes(p.status)) || ps[0];
+  await selectPkg(live.id);
+}
+async function selectPkg(pid){
+  pkg=await api('/api/offline-packages/'+pid);
+  if(!chain[pid]) chain[pid]=[];
+  saveChain();
+  renderPkg();
+}
+function localRecords(){ return chain[pkg.id]||[]; }
+function nextSeq(){ return localRecords().length+1; }
+function stepPos(){
+  // 返回授权段内每步四拍序号映射
+  const m={}; let base=0;
+  for(let s=pkg.seg_from;s<=pkg.seg_to;s++){
+    m[s]={SCAN:base+1,LIVE:base+2,EXEC:base+3,GUARD:base+4}; base+=4;
+  }
+  return m;
+}
+function stepOfSeq(){
+  const by={}; const pos=stepPos();
+  for(const s in pos) for(const t in pos[s]) by[pos[s][t]]={step:+s,type:t};
+  return by;
+}
+function renderPkg(){
+  if(!pkg){ $('work-card').style.display='none'; $('pkg-detail').innerHTML=''; return; }
+  $('cur-pkg').textContent=pkg.id;
+  $('work-card').style.display=['ACTIVE','PARTIAL'].includes(pkg.status)?'block':'none';
+  $('cur-scope').innerHTML=`授权范围：${pkg.ticket} 步骤 <b>${pkg.seg_from}→${pkg.seg_to}</b>｜电网版本 v${pkg.snapshot}｜执行者 ${pkg.executor}｜监护者 ${pkg.guardian}｜截止 ${new Date(pkg.deadline).toLocaleString('zh-CN',{hour12:false})}｜<span class="tag pkg-${pkg.status}">${pkg.status}</span>${pkg.void_reason?` <span class="err">${pkg.void_reason}</span>`:''}`;
+  // 当前步骤：授权段内第一个未闭环步骤
+  const remote={}; for(const r of pkg.records) remote[r.payload.seq]=r;
+  const pos=stepPos();
+  curStepSeq=null;
+  for(let s=pkg.seg_from;s<=pkg.seg_to;s++){
+    const st=(pkg.steps.find(x=>x.seq===s)||{}).status;
+    const g=remote[pos[s].GUARD];
+    if(st!=='VERIFIED' && !(g && g.status==='ACCEPTED')){ curStepSeq=s; break; }
+  }
+  const step=ticket.steps.find(x=>x.seq===curStepSeq);
+  $('cur-step').innerHTML= step ? `${curStepSeq}. ${step.desc}（期望 ${step.expected}）` : '授权段内步骤均已闭环。';
+  // 本地四拍状态（未上传/待补/采纳/驳回 合并本地与服务端视图）
+  const c=$('cur-chain'); c.innerHTML='';
+  if(step){
+    for(const typ of ['SCAN','LIVE','EXEC','GUARD']){
+      const eseq=pos[curStepSeq][typ];
+      const local=localRecords().find(r=>r.seq===eseq);
+      const rem=remote[eseq];
+      let cls='ev-PENDING', txt='未上传';
+      if(rem){ cls='ev-'+rem.status; txt=`${rem.status}${rem.reason?'：'+rem.reason:''}`; }
+      else if(local){ cls='ev-WAITING'; txt='本地已造证·待补传'; }
+      const names={SCAN:'扫码',LIVE:'设备实况',EXEC:'执行确认',GUARD:'监护确认'};
+      c.insertAdjacentHTML('beforeend',`<div class="${cls}"><b>#${eseq} ${names[typ]}</b><br>${txt}</div>`);
+    }
+  }
+  renderPkgDetail();
+  updateCursor();
+}
+function renderPkgDetail(){
+  const box=$('pkg-detail'); if(!pkg){ box.innerHTML=''; return; }
+  const remote={}; for(const r of pkg.records) remote[r.payload.seq]=r;
+  const pos=stepPos(); let html='';
+  for(let s=pkg.seg_from;s<=pkg.seg_to;s++){
+    const step=ticket.steps.find(x=>x.seq===s)||{desc:'?'};
+    html+=`<div style="margin:6px 0;border-top:1px solid #22303f;padding-top:6px"><b>步骤 ${s} · ${step.desc}</b> <span class="${step.status}">${step.status||''}</span><div class="chain4">`;
+    for(const typ of ['SCAN','LIVE','EXEC','GUARD']){
+      const eseq=pos[s][typ]; const rem=remote[eseq]; const local=localRecords().find(r=>r.seq===eseq);
+      const names={SCAN:'扫码',LIVE:'设备实况',EXEC:'执行确认',GUARD:'监护确认'};
+      let body;
+      if(rem) body=`<b class="ev-${rem.status}">#${eseq} ${names[typ]} ${rem.status}</b>${rem.reason?`<br><span class="ev-REJECTED">${rem.reason}</span>`:''}`;
+      else if(local) body=`<b class="ev-WAITING">#${eseq} ${names[typ]}</b><br>本地已造证·待补传`;
+      else body=`<b class="ev-PENDING">#${eseq} ${names[typ]}</b><br>未上传`;
+      html+=`<div>${body}</div>`;
+    }
+    html+='</div></div>';
+  }
+  box.innerHTML=html;
+}
+function updateCursor(){
+  $('cursor-info').textContent=`同步游标：${pkg.sync_cursor}/${pkg.records_total}｜链路连续性：${pkg.chain_continuous?'连续':'缺口/驳回'}｜本地待传 ${localRecords().length} 条`;
+}
+function curStep(){ return ticket.steps.find(x=>x.seq===curStepSeq); }
+function assertLive(){
+  if(!$('offline').checked){ say('请先勾选"断网模式"进行无网作业（在线常规作业请用下方步骤清单）', false); return false; }
+  if(!['ACTIVE','PARTIAL'].includes(pkg.status)){ say('授权包已失效：'+(pkg.void_reason||pkg.status), false); return false; }
+  if(!curStep()){ say('授权段内无待执行步骤', false); return false; }
+  return true;
+}
+async function appendEv(type, extra){
+  const step=curStep();
+  const eseq=stepPos()[curStepSeq][type];
+  const expected=nextSeq();
+  if(eseq!==expected){
+    say(`证据链必须连续：下一条应为 #${expected}，#${eseq} 的前序缺失（待补前序，禁止跨越）。请先补齐前序四拍。`, false);
+    return false;
+  }
+  const rec={pkg:pkg.id,seq:eseq,type,step:curStepSeq,
+    actor:(type==='GUARD'?pkg.guardian:pkg.executor),
+    scanned:null,device_state:null,grounded:null,energized:null,
+    ts:Date.now(),...extra};
+  const prev=localRecords().length?localRecords()[localRecords().length-1].hash:'GENESIS';
+  const payload={}; for(const k of FIELDS) payload[k]=rec[k];
+  rec.prev_hash=prev; rec.hash=await sha16(prev==='GENESIS'?'':prev,payload);
+  chain[pkg.id].push(rec); saveChain(); renderPkg();
+  return true;
+}
+async function evScan(){
+  if(!assertLive()) return;
+  const dev=$('scan').value.trim();
+  if(!dev){ say('请先扫码/输入设备号',false); return; }
+  const s=curStep(); const valid=new Set([s.device,s.point,s.sw].filter(Boolean));
+  if(!valid.has(dev)){ say(`扫码设备 ${dev} 与步骤要求不符（${[...valid].join('/')}），证据将被驳回`,false); }
+  await appendEv('SCAN',{scanned:dev});
+  $('scan-info').textContent='已本地扫码取证（断网，未访问主站）';
+  say('扫码证据已入本地链',true);
+}
+async function evLive(){
+  if(!assertLive()) return;
+  const s=curStep();
+  let extra={};
+  if(s.kind==='OPEN_SWITCH'||s.kind==='CLOSE_SWITCH') extra={device_state:s.expected};
+  else if(s.kind==='INSTALL_GROUND') extra={grounded:true,energized:false};
+  else extra={grounded:false};
+  await appendEv('LIVE',extra);
+  say('设备实况证据已入本地链（执行后现场应观察到的位置）',true);
+}
+async function evOperate(){
+  if(!assertLive()) return;
+  const s=curStep();
+  // 断网：物理操作由终端就地闭锁逻辑放行（携带授权包），主站不可达
+  try{
+    let body,url;
+    if(s.kind==='OPEN_SWITCH'||s.kind==='CLOSE_SWITCH'){ url='/sim/switch'; body={device:s.device,state:s.expected,pkg:pkg.id,actor:pkg.executor}; }
+    else { url='/sim/ground'; body={point:s.point,sw:s.sw,action:s.kind==='INSTALL_GROUND'?'install':'remove',ticket:ticket.id,pkg:pkg.id,actor:pkg.executor}; }
+    await api(url,'POST',body);
+    await appendEv('EXEC',{});
+    say('设备已就地操作，执行确认已入本地链',true);
+  }catch(e){ say('就地闭锁拒绝操作：'+e.detail,false); }
+}
+async function evGuard(){
+  if(!assertLive()) return;
+  if($('me').value.trim()===$('checker').value.trim()){ say('监护者必须与执行者不同',false); return; }
+  await appendEv('GUARD',{});
+  say('监护确认已入本地链，等待整包补传',true);
+}
+async function syncPkg(){
+  if(!pkg){ say('无授权包',false); return; }
+  const recs=localRecords();
+  if(!recs.length){ say('本地无待补传证据',false); return; }
+  try{
+    const v=await api(`/api/offline-packages/${pkg.id}/submit`,'POST',{records:recs});
+    pkg=v; renderPkg();
+    const b=v.by_status;
+    say(`整包补传完成：采纳 ${b.ACCEPTED}、待补前序 ${b.WAITING}、驳回 ${b.REJECTED+b.DUP_CONFLICT}、未传 ${b.PENDING}；包状态 ${v.status}`,
+        b.REJECTED+b.DUP_CONFLICT===0);
+    // 全部闭环后清空本地链
+    if(['COMPLETED','SUPERSEDED'].includes(v.status)){ chain[pkg.id]=[]; saveChain(); }
+    await loadTicket();
+  }catch(e){ say('整包被拒绝：'+e.detail,false); }
+}
+function renderSteps(){
+  const box=$('steps'); box.innerHTML='';
+  if(!ticket){ return; }
+  for(const s of ticket.steps){
+    const d=document.createElement('div'); d.className='step';
+    d.innerHTML=`<span>${s.seq}. ${s.desc}</span> <span class="${s.status}">${s.status}${s.reporter?` 回报:${s.reporter}`:''}${s.verifier?` 复核:${s.verifier}`:''}</span>`;
+    box.appendChild(d);
+  }
+}
+refreshList();
+setInterval(async()=>{ if(!$('offline').checked && ticket){ await loadTicket(); } }, 3000);
+</script>
+</body>
+</html>
